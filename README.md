@@ -24,7 +24,7 @@ Playwright-скрейпер), почты — с сайтов, из поиско�
 
 ```powershell
 py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1   # если блокирует политика: Set-ExecutionPolicy -Scope Process Bypass
 pip install -r requirements.txt
 python -m playwright install chromium
 Copy-Item .env.example .env
@@ -54,6 +54,9 @@ Copy-Item .env.example .env
 # полный цикл: Maps (Apify) + сайты + поиск почт
 python main.py -q "restaurants in Ocean City, MD" --limit 100 -v
 
+# то же без активации venv (обёртка сама берёт .venv\Scripts\python.exe)
+.\run.cmd -q "restaurants in Ocean City, MD" --limit 100 -v
+
 # с подбором info@/contact@ для тех, у кого почты нет нигде
 python main.py -q "bars in Miami, FL" --limit 50 --guess -v
 
@@ -75,6 +78,25 @@ python main.py -q "pizza in Boston, MA" --limit 20 --provider playwright --heade
 30, до 3 на заведение). DuckDuckGo быстро включает тормоз, поэтому для больших
 списков лучше `--search-limit 10` и запуск в несколько заходов.
 
+### Если `ModuleNotFoundError: No module named 'dotenv'`
+
+Значит `python` в терминале — системный (3.14), а зависимости стоят в `.venv`.
+Проверь, что в приглашении есть `(.venv)`, либо запускай так:
+
+```powershell
+.\run.cmd -q "restaurants in Ocean City, MD" --limit 50 -v
+# или напрямую
+.\.venv\Scripts\python.exe main.py -q "restaurants in Ocean City, MD" --limit 50 -v
+```
+
+`.cmd` работает в PowerShell и cmd без настроек. Вариант `.\run.ps1` требует
+разрешённых скриптов; если PowerShell ругается — на один сеанс:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run.ps1 -q "restaurants in Ocean City, MD" --limit 50 -v
+```
+
 ## Результаты
 
 | Файл | Содержимое |
@@ -94,6 +116,7 @@ Status, Sources, Google Maps URL, Note.
 
 ```
 main.py                    # точка входа
+run.cmd / run.ps1          # запуск через .venv без активации
 email_parser/
   cli.py                   # argparse, логирование
   config.py                # .env -> Settings
