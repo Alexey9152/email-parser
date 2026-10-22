@@ -15,6 +15,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from .categories import CATEGORY_GROUPS, FOOD_CATEGORIES
 from .config import PROJECT_ROOT, Settings
 from .pipeline import run
+from .progress import ProgressTracker
 from .utils import parse_bbox
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class Job:
         self.stats: dict = {}
         self.error = ""
         self.started = time.time()
+        self.progress = ProgressTracker()
         self.lock = threading.Lock()
 
     def add(self, line: str) -> None:
@@ -47,6 +49,7 @@ class Job:
                 "state": self.state,
                 "log": self.log[-600:],
                 "stats": self.stats,
+                "progress": self.progress.snapshot(),
                 "error": self.error,
                 "files": files,
                 "elapsed": round(time.time() - self.started, 1),
@@ -89,9 +92,15 @@ def _run_job(job: Job, settings: Settings, options: dict) -> None:
             categories=options["categories"],
             area=options["area"],
             require_website=options["require_website"],
+            progress=job.progress,
         )
         job.stats = stats.as_dict()
         job.state = "done"
+        job.progress.update(
+            stage="done",
+            message=f"Готово: {stats.with_email} e-mail из {stats.filtered} заведений",
+            emails_found=stats.with_email,
+        )
         job.add(
             f"Готово: {stats.with_email} e-mail из {stats.filtered} заведений. "
             f"Файл: {job.out_dir / 'final_contacts.xlsx'}"
@@ -100,6 +109,7 @@ def _run_job(job: Job, settings: Settings, options: dict) -> None:
         log.exception("UI run failed")
         job.error = str(exc)
         job.state = "error"
+        job.progress.update(stage="error", message=str(exc))
         job.add(f"ERROR: {exc}")
     finally:
         package_logger.removeHandler(handler)
@@ -173,7 +183,15 @@ def create_app(settings: Settings | None = None) -> Flask:
     def status():
         job = state.get("job")
         if job is None:
-            return jsonify({"state": "idle", "log": [], "stats": {}, "files": []})
+            return jsonify(
+                {
+                    "state": "idle",
+                    "log": [],
+                    "stats": {},
+                    "files": [],
+                    "progress": ProgressTracker().snapshot(),
+                }
+            )
         return jsonify(job.snapshot())
 
     @app.get("/api/download/<name>")

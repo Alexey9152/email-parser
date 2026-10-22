@@ -13,6 +13,7 @@ from .extractors import (
     emails_from_page,
     collect_links,
     contact_links,
+    facebook_from_html,
     social_links,
 )
 from .http_client import FetchResult, HttpClient
@@ -39,6 +40,11 @@ COMMON_CONTACT_PATHS = (
     "/reservations",
     "/impressum",
     "/info",
+    "/find-us",
+    "/locations",
+    "/visit",
+    "/follow",
+    "/links",
 )
 
 
@@ -65,7 +71,7 @@ class WebsiteCrawler:
         self.http = http
         self.max_pages = max(2, max_pages)
 
-    def analyze(self, website: str) -> WebsiteResult:
+    def analyze(self, website: str, title: str = "") -> WebsiteResult:
         start = normalize_url(website)
         result = WebsiteResult(website=start or website)
         if not start:
@@ -86,13 +92,18 @@ class WebsiteCrawler:
 
         base = fetch.url
         links = collect_links(soup, base)
-        socials = social_links(links)
-        result.facebook_url = socials.get("facebook", "")
+        socials = social_links(links, title=title)
+        result.facebook_url = socials.get("facebook", "") or facebook_from_html(
+            fetch.text, title=title
+        )
         result.instagram_url = socials.get("instagram", "")
 
-        # Follow contact/about pages: they still may hold the Facebook link.
-        candidates = [link.url for link in contact_links(links, base, limit=self.max_pages - 1)]
-        if not result.emails:
+        # Follow contact/about pages: they may hold another (manager) address
+        # and they very often contain the Facebook link in the footer.
+        candidates = [
+            link.url for link in contact_links(links, base, limit=self.max_pages - 1)
+        ]
+        if not result.emails or not result.facebook_url or len(candidates) < 2:
             candidates += [self._path_link(base, p) for p in COMMON_CONTACT_PATHS]
 
         seen = {base.rstrip("/")}
@@ -110,9 +121,14 @@ class WebsiteCrawler:
             sub_emails, sub_soup = emails_from_page(sub_fetch.text)
             result.emails = unique(result.emails + sub_emails)
             if not result.facebook_url:
-                result.facebook_url = social_links(collect_links(sub_soup, sub_fetch.url)).get("facebook", "")
-            if result.emails:
-                break
+                sub_links = collect_links(sub_soup, sub_fetch.url)
+                result.facebook_url = social_links(
+                    sub_links, title=title
+                ).get("facebook", "") or facebook_from_html(
+                    sub_fetch.text, title=title
+                )
+            # Do not break after the first address: a small "info@" may be on
+            # the homepage while the manager's address is on /contact.
 
         return result
 

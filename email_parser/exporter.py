@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import ContactResult, Restaurant
+from .models import (
+    SOURCE_FB_PAGE,
+    SOURCE_FB_SNIPPET,
+    SOURCE_GUESS,
+    SOURCE_LABELS,
+    SOURCE_SEARCH,
+    SOURCE_SITE,
+    SOURCE_SITE_JS,
+    SOURCE_STATUS,
+    STATUS_NOT_FOUND,
+    ContactResult,
+    Restaurant,
+)
 from .utils import Area, ensure_parent, unique
 
 CSV_COLUMNS = (
@@ -30,7 +43,18 @@ CSV_COLUMNS = (
     ("Latitude", "latitude"),
     ("Longitude", "longitude"),
     ("Query", "source_query"),
+    ("Primary Email Source", "primary_email_source_label_en"),
+    ("Email Sources", "email_sources_text"),
 )
+
+SOURCE_CSV_LABELS = {
+    SOURCE_SITE: "website",
+    SOURCE_SITE_JS: "website (js render)",
+    SOURCE_FB_PAGE: "facebook (page)",
+    SOURCE_FB_SNIPPET: "facebook (search snippet)",
+    SOURCE_SEARCH: "web search",
+    SOURCE_GUESS: "guessed MX",
+}
 
 STATUS_LABELS = {
     "Found on site": "Найден на сайте",
@@ -84,6 +108,13 @@ def save_results_csv(path: str | Path, results: list[ContactResult]) -> Path:
         for row in results:
             data = row.to_dict()
             data["primary_email"] = row.primary_email
+            data["primary_email_source_label_en"] = SOURCE_CSV_LABELS.get(
+                row.primary_email_source, row.primary_email_source
+            )
+            data["email_sources_text"] = "; ".join(
+                f"{email} <- {SOURCE_CSV_LABELS.get(source, source)}"
+                for email, source in row.email_sources.items()
+            )
             writer.writerow({name: data.get(key, "") for name, key in CSV_COLUMNS})
     return path
 
@@ -109,6 +140,8 @@ XLSX_HEADERS = (
     ("Широта", 11),
     ("Долгота", 11),
     ("Запрос", 30),
+    ("Откуда основной e-mail", 26),
+    ("Источники e-mail", 48),
 )
 
 
@@ -169,6 +202,11 @@ def save_results_xlsx(
             row.latitude,
             row.longitude,
             row.source_query,
+            row.primary_email_source_label,
+            "; ".join(
+                f"{email} ← {SOURCE_LABELS.get(source, source)}"
+                for email, source in row.email_sources.items()
+            ),
         ]
         for column, value in enumerate(values, start=1):
             cell = sheet.cell(row=row_index, column=column, value=value)
@@ -194,10 +232,11 @@ def save_results_xlsx(
 
     last_row = max(2, len(results) + 1)
     sheet.freeze_panes = "B2"
-    sheet.auto_filter.ref = f"A1:S{last_row}"
+    sheet.auto_filter.ref = f"A1:U{last_row}"
 
     _write_summary(workbook, results, meta)
     workbook.save(path)
+    workbook.close()
     return path
 
 
@@ -291,6 +330,170 @@ def _write_summary(workbook, results: list[ContactResult], meta: dict[str, Any])
     )
     sheet.merge_cells(start_row=current, start_column=1, end_row=current, end_column=2)
     sheet.row_dimensions[current].height = 90
+
+
+STATUS_VALUES = {label: value for value, label in STATUS_LABELS.items()}
+SOURCE_VALUES = {label: value for value, label in SOURCE_LABELS.items()}
+SOURCE_EN_VALUES = {label: value for value, label in SOURCE_CSV_LABELS.items()}
+
+
+def _source_from_status(status: str) -> str:
+    lowered = (status or "").lower()
+    if "facebook" in lowered or "fb" in lowered:
+        return SOURCE_FB_PAGE
+    if "рендер" in lowered or "render" in lowered:
+        return SOURCE_SITE_JS
+    if "поиск" in lowered or "search" in lowered:
+        return SOURCE_SEARCH
+    if "предполож" in lowered or "guess" in lowered:
+        return SOURCE_GUESS
+    if "сайт" in lowered or "site" in lowered:
+        return SOURCE_SITE
+    return ""
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value) -> int | None:
+    try:
+        return int(float(str(value).replace(",", ".")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_emails(value) -> list[str]:
+    return [
+        item.strip().lower()
+        for item in re.split(r"[,;]\s*", str(value or ""))
+        if "@" in item and item.strip()
+    ]
+
+
+def load_results_json(path: str | Path) -> list[ContactResult]:
+    path = Path(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        payload = payload.get("results") or payload.get("contacts") or []
+    return [ContactResult.from_dict(row) for row in payload]
+
+
+def load_results_xlsx(path: str | Path) -> list[ContactResult]:
+    """Read the «Контакты» sheet back, e.g. to send the application e-mails."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise RuntimeError(
+            "openpyxl is required to read the Excel report: pip install openpyxl"
+        ) from exc
+
+    path = Path(path)
+    workbook = load_workbook(filename=path, read_only=True, data_only=True)
+    sheet = workbook["Контакты"] if "Контакты" in workbook.sheetnames else workbook.active
+    # Read once and close immediately: on Windows an open read-only workbook
+    # keeps the .xlsx locked until the process exits.
+    rows = list(sheet.iter_rows(values_only=True))
+    workbook.close()
+    if not rows:
+        return []
+    headers = rows[0]
+
+    index = {
+        str(value).strip(): position
+        for position, value in enumerate(headers)
+        if value is not None
+    }
+
+    def cell(values, *names):
+        for name in names:
+            position = index.get(name)
+            if position is not None and position < len(values):
+                return values[position]
+        return None
+
+    results: list[ContactResult] = []
+    for values in rows[1:]:
+        title = str(cell(values, "Название", "Name") or "").strip()
+        if not title:
+            continue
+
+        emails = _split_emails(cell(values, "E-mail", "Emails"))
+        primary = str(
+            cell(values, "Основной e-mail", "Primary Email") or ""
+        ).strip().lower()
+        if primary and "@" in primary:
+            emails = [primary] + [email for email in emails if email != primary]
+
+        source_label = str(
+            cell(
+                values,
+                "Откуда основной e-mail",
+                "Primary Email Source",
+            )
+            or ""
+        ).strip()
+        source = (
+            SOURCE_VALUES.get(source_label)
+            or SOURCE_EN_VALUES.get(source_label)
+            or ""
+        )
+        status_label = str(cell(values, "Статус", "Status") or "").strip()
+        status = STATUS_VALUES.get(status_label, status_label)
+        if status not in STATUS_LABELS:
+            status = ""
+        if not source:
+            source = _source_from_status(status_label)
+        if not status:
+            status = SOURCE_STATUS.get(source, STATUS_NOT_FOUND)
+
+        sources_raw = str(cell(values, "Источник", "Sources") or "")
+        sources = [item.strip() for item in sources_raw.split(";") if item.strip()]
+
+        results.append(
+            ContactResult(
+                title=title,
+                website=str(cell(values, "Сайт", "Website") or "").strip(),
+                emails=emails,
+                facebook_url=str(
+                    cell(values, "Facebook") or ""
+                ).strip(),
+                phone=str(cell(values, "Телефон", "Phone") or "").strip(),
+                address=str(cell(values, "Адрес", "Address") or "").strip(),
+                status=status,
+                sources=sources,
+                google_maps_url=str(
+                    cell(values, "Google Maps", "Google Maps URL") or ""
+                ).strip(),
+                note=str(cell(values, "Примечание", "Note") or "").strip(),
+                category=str(cell(values, "Категория", "Category") or "").strip(),
+                rating=_as_float(cell(values, "Рейтинг", "Rating")),
+                reviews=_as_int(cell(values, "Отзывов", "Reviews")),
+                price=str(cell(values, "Цена", "Price") or "").strip(),
+                latitude=_as_float(cell(values, "Широта", "Latitude")),
+                longitude=_as_float(cell(values, "Долгота", "Longitude")),
+                source_query=str(cell(values, "Запрос", "Query") or "").strip(),
+                email_sources={primary: source} if primary and source else {},
+                primary_email_override=primary,
+            )
+        )
+    return results
+
+
+def load_contacts(path: str | Path) -> list[ContactResult]:
+    """Load an existing report (xlsx preferred, JSON also accepted)."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found")
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        return load_results_xlsx(path)
+    if suffix == ".json":
+        return load_results_json(path)
+    raise ValueError(f"unsupported report format: {path.suffix} (use .xlsx or .json)")
 
 
 def rows_with_email(results: Iterable[ContactResult]) -> list[ContactResult]:

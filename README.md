@@ -6,7 +6,8 @@
 Основной сценарий: выделил область на карте → выбрал категории (рестораны, кофейни,
 мороженое, шаурма, бары, фуд-траки…) → получил `final_contacts.xlsx`, где у каждой
 строки есть кликабельные ссылки на сайт, Facebook и Google Maps, чтобы вручную
-проверить, откуда взялся адрес.
+проверить, откуда взялся адрес. Затем `python main.py send` строит персональные
+письма по этой таблице (по умолчанию — только превью, без отправки).
 
 ## Как это работает
 
@@ -25,6 +26,45 @@
 5. **JS-рендер** (флаг `--js`) для тяжёлых React/Vue-сайтов.
 6. **Подбор по MX** (флаг `--guess`): `info@домен` / `contact@домен`, только если домен
    реально принимает почту. Это **непроверенная догадка**, в отчёте она помечена.
+7. **Выбор лучшего адреса**: все найденные адреса не перезаписывают друг друга, а
+   складываются в один список с пометкой источника. Для отклика выбирается
+   `manager@` / `hiring@` / `hr@` / `jobs@` / `careers@`, а не первый попавшийся
+   `info@`. Если на сайте только общий ящик, пайплайн дополнительно ищет страницу
+   Facebook и менеджерский адрес там.
+
+## Как выбирается основной e-mail
+
+Для каждой строки адреса ранжируются по вероятности найти человека, который нанимает
+персонал:
+
+- **высший приоритет** — `manager`, `hiring`, `hr`, `recruit`, `jobs`, `careers`,
+  `employment`, `owner`, `apply`;
+- **хороший запасной вариант** — `info`, `contact`, `hello`, `office`, `admin`;
+- **низкий приоритет** — `reservations`, `booking`, `events`, `sales`, `marketing`,
+  `press`, `support`;
+- адрес с домена самого заведения чуть предпочтительнее чужого;
+- личный Gmail на странице Facebook ценится выше безликого `info@` на сайте;
+- `webmaster@`, `privacy@`, `billing@` и подобные отодвигаются вниз;
+- `Guessed (unverified)` всегда в конце и по умолчанию **не используется** для рассылки.
+
+Порядок и источник каждого адреса видны в Excel: столбцы «Основной e-mail»,
+«Откуда основной e-mail» и «Источники e-mail».
+
+## Поиск Facebook
+
+Facebook ищется не только по ссылке в подвале главной страницы:
+
+- все ссылки в HTML, включая `facebook.com`, `fb.com`, `fb.me`;
+- JSON-LD `sameAs`, `<link rel="me">`, inline-JS;
+- экранированные URL (`https:\/\/facebook.com\/...`) и HTML-сущности;
+- страницы `/contact`, `/about`, `/find-us`, `/locations`, `/links` и другие
+  контактные разделы (обход не останавливается на первом найденном e-mail);
+- поисковые сниппеты Google через Apify, если на сайте ссылки нет;
+- страница Facebook открывается в Chromium, раскрывается блок «See more / About»,
+  откуда часто виден e-mail менеджера.
+
+Ссылки на `sharer`, `plugins`, `login`, `help`, посты и служебные разделы
+отбрасываются; из `facebook.com/venue/posts/123` остаётся `facebook.com/venue`.
 
 ## Установка
 
@@ -55,6 +95,12 @@ Copy-Item .env.example .env
 | `SERPAPI_KEY` | необязателен; если есть, используется первым |
 | `HTTP_TIMEOUT` / `HTTP_WORKERS` | сеть и параллельность обхода сайтов |
 | `HEADLESS` | `0` — показывать окно браузера (отладка) |
+| `SMTP_HOST` / `SMTP_PORT` | SMTP-сервер и порт (587 для STARTTLS, 465 для SSL) |
+| `SMTP_USER` / `SMTP_PASSWORD` | логин и пароль приложения (не обычный пароль почты) |
+| `SMTP_SSL` / `SMTP_STARTTLS` | `SMTP_SSL=1` для порта 465; по умолчанию STARTTLS |
+| `MAIL_FROM` / `MAIL_FROM_NAME` | видимый адрес и имя отправителя |
+| `MAIL_REPLY_TO` / `MAIL_BCC` | необязательные Reply-To и копия себе |
+| `MAIL_DELAY` / `MAIL_DAILY_LIMIT` | пауза между письмами (30 с) и лимит в день (50) |
 
 При `SEARCH_BACKEND=auto` порядок такой: SerpAPI (если ключ) → **Apify Google**
 (если токен) → DuckDuckGo. DuckDuckGo и прямой Google с обычного IP сейчас часто
@@ -75,8 +121,10 @@ Copy-Item .env.example .env
 - отметь категории (кнопки групп: «Всё», «Рестораны», «Напитки», «Сладости»,
   «Уличная еда», «Кухни»);
 - задай лимит, при необходимости включи JS-рендер / подбор по MX;
-- нажми «Запустить поиск» — журнал идёт внизу, по завершении появятся кнопки
-  «Скачать Excel» и «Скачать CSV».
+- нажми «Запустить поиск» — сверху виден **конкретный прогресс**: этап, сколько
+  сайтов/запросов/страниц Facebook обработано и сколько осталось, сколько e-mail уже
+  найдено; журнал идёт внизу, по завершении появятся кнопки «Скачать Excel» и
+  «Скачать CSV».
 
 Если выбрана область, категории ищутся **внутри полигона** (без «in City»), поэтому
 не важно, насколько точно ты назвал город текстом.
@@ -102,6 +150,12 @@ python main.py --stage emails --input data/restaurants_list.json --js --guess -v
 # бесплатный скрейпер Maps вместо Apify
 python main.py -q "pizza in Boston, MA" --limit 20 --provider playwright --headed
 
+# превью писем по готовой таблице (ничего не отправляется)
+python main.py send --input data/final_contacts.xlsx
+
+# реальная отправка: SMTP в .env, резюме и явный флаг --send
+python main.py send --input data/final_contacts.xlsx --resume data/Alex_Los_Resume.pdf --send
+
 # список категорий и групп
 python main.py --list-categories
 ```
@@ -121,7 +175,7 @@ python main.py --list-categories
 | `--no-fb-page` | не открывать Facebook в браузере (по умолчанию открывается) |
 | `--fb-limit` | сколько страниц Facebook максимум открыть (60) |
 | `--no-search` | не искать в Google/Facebook |
-| `--search-limit` | максимум поисковых запросов (0 = 2 на заведение, но не больше `SEARCH_MAX_QUERIES`) |
+| `--search-limit` | максимум поисковых запросов (0 = 2 для заведения без адреса, 1 для `info@`, но не больше `SEARCH_MAX_QUERIES`) |
 | `--search-provider` | `auto` / `apify` / `serpapi` / `ddg` / `none` |
 | `--js` | рендерить сайты без почты в Chromium |
 | `--guess` | добавить `info@`/`contact@` после проверки MX |
@@ -134,10 +188,12 @@ python main.py --list-categories
 
 **«Контакты»**: №, Название, Категория, Рейтинг, Отзывов, Цена, Сайт, E-mail,
 Основной e-mail, Facebook, Телефон, Адрес, Статус, Источник, Google Maps, Примечание,
-Широта, Долгота, Запрос.
+Широта, Долгота, Запрос, Откуда основной e-mail, Источники e-mail.
 
 - ссылки на сайт, Facebook и Google Maps **кликабельны**;
 - основной e-mail — ссылка `mailto:`;
+- «Откуда основной e-mail» показывает, выбран ли адрес с сайта, Facebook или поиска;
+- «Источники e-mail» перечисляет **все** найденные адреса и их происхождение;
 - включены фильтры по столбцам и закреплена шапка;
 - статус подсвечен: зелёный — найден, жёлтый — догадка, красный — не найден.
 
@@ -160,6 +216,46 @@ python main.py --list-categories
 удобно для скриптов) и `final_contacts.json`, а также `restaurants_raw.json` и
 `restaurants_list.json` с этапа сбора.
 
+## Рассылка Work & Travel
+
+`send` читает Excel-отчёт (или JSON), берёт **основной e-mail** из каждой строки и
+подставляет в письмо название заведения и место, где адрес был найден.
+
+Сначала — только превью, без сети:
+
+```powershell
+python main.py send --input data/final_contacts.xlsx
+```
+
+Будет создан `data/email_preview.txt`; в консоль выводятся первые 3 письма. Проверь
+текст, адреса и ссылки. Затем настрой SMTP в `.env` (для Gmail/Yandex нужен
+«пароль приложения», а не обычный пароль), положи резюме в `data/resume.pdf` и
+запусти реальную отправку:
+
+```powershell
+python main.py send --input data/final_contacts.xlsx --resume data/Alex_Los_Resume.pdf --send
+```
+
+Что уже встроено:
+
+- письмо начинается с названия заведения и фразы вида «I found this e-mail address
+  (manager@...) on your Facebook page (ссылка)»;
+- текст письма — `templates/application_email.txt`, его можно править без кода;
+  доступны `{restaurant}`, `{email}`, `{source}`, `{source_link}`, `{found_note}`,
+  `{website}`, `{facebook}`, `{maps}`, `{address}`, `{phone}`;
+- тема по умолчанию: `Work & Travel application — {restaurant}`;
+- резюме прикрепляется к каждому письму;
+- адреса `Guessed (unverified)` по умолчанию **пропускаются**;
+- дубли e-mail удаляются, уже отправленные адреса берутся из `data/sent_log.json`;
+- между письмами пауза `MAIL_DELAY` (30 с), действует дневной лимит
+  `MAIL_DAILY_LIMIT` (50);
+- `--limit 5` — попробовать на пяти адресах; `--status` / `--source` — фильтры;
+- `--include-sent` — отправить повторно, `--include-guessed` — включить догадки,
+  `--no-attach` — без резюме.
+
+Без флага `--send` команда **физически ничего не отправляет**. Журнал успешных
+отправок: `data/sent_log.json`.
+
 ## Сколько это стоит
 
 - **Apify Google Maps**: зависит от числа заведений и категорий; лимит делится между
@@ -167,7 +263,8 @@ python main.py --list-categories
   смотри тариф актора `compass/crawler-google-places`.
 - **Apify Google Search**: около **$0.00105 за результат**. Один запрос — обычно
   до 10 результатов, то есть ~$0.01; 20 запросов в живом прогоне дали 167 результатов
-  и ~$0.18. Авто-бюджет — 2 запроса на заведение без почты.
+  и ~$0.18. Авто-бюджет — 2 запроса на заведение без почты и 1 запрос на
+  заведение, где найден только общий `info@` (чтобы поискать менеджера).
 - **Playwright** (Maps/сайты) — бесплатно, но медленнее и может упираться в капчу.
 
 Управлять расходом: `--limit`, `--search-limit`, `--fb-limit`, `--no-search`,
@@ -195,19 +292,21 @@ run.cmd / run.ps1          # CLI через .venv без активации
 ui.cmd                     # UI через .venv без активации
 email_parser/
   cli.py                   # argparse, валидация, итоги
-  config.py                # .env -> Settings
-  models.py                # Restaurant / ContactResult / статусы
+  config.py                # .env -> Settings (включая SMTP)
+  models.py                # Restaurant / ContactResult / рейтинг e-mail
   categories.py            # 53 категории, группы, запросы Maps
   utils.py                 # bbox, Area/GeoJSON, URL, город
   http_client.py           # httpx: UA-ротация, ретраи, https->http
-  extractors.py            # mailto, regex, JSON-LD, JS-эскейпы, соц-ссылки
+  extractors.py            # mailto, regex, JSON-LD, JS-эскейпы, Facebook
   website.py               # обход сайта и contact-страниц
   playwright_site.py       # JS-рендер и страницы Facebook
   serp.py                  # Apify Google, SerpAPI, DDG, батчи
   facebook.py              # план запросов, разбор выдачи, фильтр адресов
   guess.py                 # info@/contact@ + MX-проверка
-  pipeline.py              # оркестрация, дедуп, поиск, FB, экспорт
-  exporter.py              # CSV/JSON/XLSX (2 листа, ссылки, статусы)
+  progress.py              # потокобезопасные счётчики для UI
+  pipeline.py              # оркестрация, слияние адресов, поиск, FB, экспорт
+  exporter.py              # CSV/JSON/XLSX + чтение отчёта обратно
+  mailer.py                # send: персонализация, SMTP, превью, журнал
   webui.py                 # Flask API + шаблон карты
   templates/index.html     # Leaflet UI
   maps/
@@ -215,7 +314,9 @@ email_parser/
     playwright_provider.py # бесплатный скрейпер Maps
     apify.py               # Apify Maps + customGeolocation (полигон)
     outscraper.py
-tests/                     # 50 тестов без сети
+templates/
+  application_email.txt    # текст письма, редактируется без кода
+tests/                     # 68 тестов без сети
 ```
 
 ## Тесты

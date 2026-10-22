@@ -78,10 +78,19 @@ class PlaywrightSiteRenderer:
             result.error = "invalid url or renderer not started"
             return result
 
+        is_facebook = any(
+            marker in start.lower()
+            for marker in ("facebook.com", "fb.me", "fb.com")
+        )
         page = self._context.new_page()
         try:
             result.emails = self._visit(page, start, result.pages)
-            if not result.emails and follow_contact:
+            if is_facebook:
+                # The address is usually in "Intro / About" behind "See more".
+                result.emails = unique(
+                    result.emails + self._facebook_expand(page)
+                )
+            elif not result.emails and follow_contact:
                 for link in self._contact_hrefs(page, limit=2):
                     if len(result.pages) >= 3:
                         break
@@ -142,6 +151,50 @@ class PlaywrightSiteRenderer:
         except Exception:
             pass
         return hrefs
+
+    def _facebook_expand(self, page) -> list[str]:
+        """Open the "Intro / About" block and re-extract the page HTML."""
+        found: list[str] = []
+        try:
+            page.wait_for_timeout(800)
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(700)
+
+            for selector in (
+                'div[role="button"]:has-text("See more")',
+                'span:has-text("See more")',
+                '[aria-label*="See more" i]',
+            ):
+                locator = page.locator(selector)
+                for index in range(min(2, locator.count())):
+                    try:
+                        locator.nth(index).click(timeout=1_500)
+                        page.wait_for_timeout(600)
+                    except Exception:
+                        continue
+                if found:
+                    break
+
+            # Some pages expose the address only on the About tab.
+            for selector in (
+                'a[href*="sk=about"]',
+                'a[href$="/about"]',
+            ):
+                locator = page.locator(selector)
+                if not locator.count():
+                    continue
+                try:
+                    locator.first.click(timeout=2_500)
+                    page.wait_for_load_state("domcontentloaded", timeout=8_000)
+                    page.wait_for_timeout(1_200)
+                    break
+                except Exception:
+                    continue
+
+            found.extend(emails_from_page(page.content())[0])
+        except Exception:
+            pass
+        return unique(found)
 
     def _click_reveal_buttons(self, page) -> list[str]:
         """Best effort: click up to 3 buttons whose label hints at contacts."""

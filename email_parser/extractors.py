@@ -262,29 +262,88 @@ def contact_links(links: list[Link], base_url: str, limit: int = 3) -> list[Link
 
 
 def _is_social_page(host: str, path: str) -> bool:
-    blocked = (
+    # Compare whole segments: a venue slug like /trattoria must not be mistaken
+    # for the tracking endpoint /tr, and /photography for /photo.
+    normalized = "/" + path.strip("/").lower()
+    if normalized in {
         "/sharer", "/dialog", "/plugins", "/login", "/help", "/policies",
-        "/legal", "/tr?", "/watch", "/recover", "/privacy", "/terms",
-        "/share", "/hashtag", "/events/", "/groups/", "/photo",
-    )
-    if any(part in path for part in blocked):
+        "/legal", "/tr", "/watch", "/watchparty", "/recover", "/privacy",
+        "/terms", "/share", "/photo", "/photos", "/business", "/ads",
+        "/ad_campaign", "/marketing", "/messages", "/permalink", "/search",
+    }:
         return False
-    return len(path.strip("/")) > 0
+    blocked_prefixes = (
+        "/sharer/", "/dialog/", "/plugins/", "/login/", "/help/",
+        "/policies/", "/legal/", "/share/", "/hashtag/", "/events/",
+        "/groups/", "/posts/", "/photos/", "/photo/", "/watch/", "/reel/",
+        "/reels/", "/videos/", "/business/", "/ads/", "/marketing/",
+        "/messages/", "/permalink/",
+    )
+    if any(normalized.startswith(prefix) for prefix in blocked_prefixes):
+        return False
+    return bool(path.strip("/"))
 
 
-def social_links(links: list[Link]) -> dict[str, str]:
-    """First plausible Facebook / Instagram / Twitter profile URL."""
-    found: dict[str, str] = {}
-    for link in links:
+# Facebook pages for "facebook", "pages", "help" etc. are never a venue.
+FB_GENERIC_SLUGS = frozenset(
+    {
+        "facebook", "pages", "people", "public", "help", "business", "login",
+        "share", "sharer", "plugins", "dialog", "groups", "events", "watch",
+        "reel", "marketplace", "gaming", "privacy", "policies", "terms",
+        "legal", "about", "home", "photo", "photos", "video", "videos",
+        "story", "permalink", "profile", "search", "hashtag", "ads",
+    }
+)
+
+
+def _title_tokens(title: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[a-z0-9']{3,}", (title or "").lower())
+        if token not in {"the", "and", "for", "inc", "llc", "ltd", "restaurant", "cafe", "bar"}
+    ]
+
+
+def _url_hint_score(url: str, title: str) -> int:
+    """How many title words appear in the Facebook/Instagram slug."""
+    tokens = _title_tokens(title)
+    if not tokens:
+        return 0
+    slug = urlsplit(url).path.strip("/").split("/")[0].lower()
+    return sum(1 for token in tokens if token in slug)
+
+
+def social_links(links: list[Link], title: str = "") -> dict[str, str]:
+    """Best plausible Facebook / Instagram / Twitter profile URL.
+
+    When several candidates exist, the one whose slug matches the venue name
+    wins (footer widgets often link to the agency's own page).
+    """
+    candidates: dict[str, list[tuple[int, int, str]]] = {}
+    for index, link in enumerate(links):
         parts = urlsplit(link.url)
         host = parts.netloc.lower().removeprefix("www.")
         path = parts.path.lower()
         for network, hosts in SOCIAL_HOSTS.items():
-            if network in found:
+            if not any(host == h or host.endswith("." + h) for h in hosts):
                 continue
-            if any(host == h or host.endswith("." + h) for h in hosts):
-                if _is_social_page(host, path):
-                    found[network] = f"https://{parts.netloc}{parts.path}"
+            if not _is_social_page(host, path):
+                continue
+            candidate = (
+                clean_facebook_url(link.url)
+                if network == "facebook"
+                else f"https://{parts.netloc}{parts.path}"
+            )
+            if not candidate:
+                continue
+            candidates.setdefault(network, []).append(
+                (_url_hint_score(candidate, title), index, candidate)
+            )
+
+    found: dict[str, str] = {}
+    for network, items in candidates.items():
+        items.sort(key=lambda item: (-item[0], item[1]))
+        found[network] = items[0][2]
     return found
 
 
@@ -333,5 +392,40 @@ def clean_facebook_url(url: str) -> str:
     slug = segments[0]
     if not re.fullmatch(r"[A-Za-z0-9._-]+", slug):
         return ""
+    if slug.lower() in FB_GENERIC_SLUGS:
+        return ""
     # Drop sub-tabs like /posts/..., /photos/..., /reviews or /e.
     return f"https://www.facebook.com/{slug}"
+
+
+# Facebook links can hide in inline JS / JSON-LD, not only in <a href>.
+_FACEBOOK_URL_RE = re.compile(
+    r"(?:https?:)?//(?:[a-z0-9-]+\.)*(?:facebook\.com|fb\.com|fb\.me)/[^\s\"'<>\\]+",
+    re.IGNORECASE,
+)
+
+
+def facebook_from_html(html: str, title: str = "") -> str:
+    """Find the venue's Facebook page anywhere in a raw HTML document.
+
+    Covers anchors, JSON-LD ``sameAs``, escaped ``https:\\/\\/...`` strings and
+    ``fb.me`` short links.  Profile/post/sharer/plugin URLs are rejected or
+    reduced to the page profile by :func:`clean_facebook_url`.
+    """
+    if not html:
+        return ""
+    text = html_lib.unescape(deobfuscate(html)).replace("\\/", "/")
+    candidates: list[tuple[int, int, str]] = []
+    for index, match in enumerate(_FACEBOOK_URL_RE.finditer(text)):
+        candidate = match.group(0).rstrip(").,;:!?'\"")
+        if candidate.startswith("//"):
+            candidate = "https:" + candidate
+        elif not candidate.lower().startswith(("http://", "https://")):
+            candidate = "https://" + candidate
+        cleaned = clean_facebook_url(candidate)
+        if cleaned:
+            candidates.append((_url_hint_score(cleaned, title), index, cleaned))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][2]

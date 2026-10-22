@@ -57,6 +57,20 @@ class Settings:
     http_workers: int = 8
     headless: bool = True
 
+    # --- outgoing mail (python main.py send) -----------------------------
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_ssl: bool = False
+    smtp_starttls: bool = True
+    mail_from: str = ""
+    mail_from_name: str = "Alex Los"
+    mail_reply_to: str = ""
+    mail_bcc: str = ""
+    mail_delay: float = 30.0
+    mail_daily_limit: int = 50
+
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
 
     @classmethod
@@ -76,6 +90,18 @@ class Settings:
             http_timeout=_env_float("HTTP_TIMEOUT", 15.0),
             http_workers=max(1, _env_int("HTTP_WORKERS", 8)),
             headless=_env_bool("HEADLESS", True),
+            smtp_host=_env("SMTP_HOST"),
+            smtp_port=_env_int("SMTP_PORT", 587),
+            smtp_user=_env("SMTP_USER"),
+            smtp_password=_env("SMTP_PASSWORD"),
+            smtp_ssl=_env_bool("SMTP_SSL", False),
+            smtp_starttls=_env_bool("SMTP_STARTTLS", True),
+            mail_from=_env("MAIL_FROM"),
+            mail_from_name=_env("MAIL_FROM_NAME", "Alex Los"),
+            mail_reply_to=_env("MAIL_REPLY_TO"),
+            mail_bcc=_env("MAIL_BCC"),
+            mail_delay=_env_float("MAIL_DELAY", 30.0),
+            mail_daily_limit=max(1, _env_int("MAIL_DAILY_LIMIT", 50)),
         )
 
     def ensure_data_dir(self) -> Path:

@@ -8,6 +8,7 @@ from email_parser.extractors import (
     contact_links,
     emails_from_page,
     extract_emails,
+    facebook_from_html,
     normalize_email,
     social_links,
     soup_from_html,
@@ -57,8 +58,8 @@ def test_contact_and_social_links():
     contacts = contact_links(links, "https://joesdiner.com/")
     assert [link.url for link in contacts][0] == "https://joesdiner.com/contact-us"
 
-    socials = social_links(links)
-    assert socials["facebook"] == "https://www.facebook.com/joesdiner/"
+    socials = social_links(links, title="Joe's Diner")
+    assert socials["facebook"] == "https://www.facebook.com/joesdiner"
     assert socials["twitter"] == "https://twitter.com/joesdiner"
 
 
@@ -96,4 +97,34 @@ def test_facebook_urls_are_reduced_to_page_profiles():
     assert (
         clean_facebook_url("https://www.facebook.com/pages/Joes/123456")
         == "https://www.facebook.com/pages/Joes/123456"
+    )
+    assert clean_facebook_url("https://www.facebook.com/sharer/sharer.php?u=x") == ""
+    assert clean_facebook_url("https://www.facebook.com/help") == ""
+    assert clean_facebook_url("https://www.facebook.com/tr?id=1") == ""
+    assert (
+        clean_facebook_url("https://www.facebook.com/trattoria")
+        == "https://www.facebook.com/trattoria"
+    )
+
+
+def test_facebook_is_found_in_scripts_json_ld_and_short_links():
+    html = r"""
+    <script>window.social = {"sameAs": "https:\/\/www.facebook.com\/JoesDiner\/"};</script>
+    <script type="application/ld+json">
+      {"@type":"Restaurant","sameAs":["https://www.facebook.com/othervenue"]}
+    </script>
+    <a href="https://fb.me/JoesDiner">fb</a>
+    <a href="https://www.facebook.com/sharer/sharer.php?u=x">share</a>
+    """
+    assert facebook_from_html(html, title="Joe's Diner") == "https://www.facebook.com/JoesDiner"
+
+
+def test_facebook_html_prefers_venue_slug_over_random_page():
+    html = """
+    <a href="https://www.facebook.com/somewidget">widget</a>
+    <a href="https://www.facebook.com/CoastalSaltOC">Coastal Salt</a>
+    """
+    assert (
+        facebook_from_html(html, title="Coastal Salt")
+        == "https://www.facebook.com/CoastalSaltOC"
     )

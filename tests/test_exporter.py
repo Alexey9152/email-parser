@@ -79,8 +79,9 @@ def test_xlsx_has_links_filters_and_summary(tmp_path):
     assert sheet["J3"].value == "https://www.facebook.com/shawarmastand"
     assert sheet["M2"].value == "Найден на сайте"
     assert sheet.freeze_panes == "B2"
-    assert sheet.auto_filter.ref == "A1:S5"
+    assert sheet.auto_filter.ref == "A1:U5"
     assert sheet.max_row == 5
+    assert sheet["T1"].value == "Откуда основной e-mail"
 
     summary = workbook["Сводка"]
     values = [cell.value for row in summary.iter_rows() for cell in row]

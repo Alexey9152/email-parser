@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
-from email_parser.models import Restaurant
-from email_parser.pipeline import build_search_queries, filter_restaurants, is_own_website
+from email_parser.models import (
+    SOURCE_FB_PAGE,
+    SOURCE_SITE,
+    ContactResult,
+    Restaurant,
+)
+from email_parser.pipeline import (
+    _add_emails,
+    _needs_better_email,
+    build_search_queries,
+    filter_restaurants,
+    is_own_website,
+)
 from email_parser.utils import Area, city_from_query, registrable_domain
 
 
@@ -57,6 +68,7 @@ def test_limit_and_helpers():
     assert is_own_website("https://place1.com") is True
     assert registrable_domain("https://menu.joes.co.uk/x") == "joes.co.uk"
     assert city_from_query("restaurants in Ocean City, MD") == "Ocean City, MD"
+    assert city_from_query("Ocean City, MD") == "Ocean City, MD"
 
 
 def test_search_queries_follow_the_drawn_area():
@@ -71,3 +83,23 @@ def test_search_queries_follow_the_drawn_area():
     ]
     assert build_search_queries("cafes in Austin, TX") == ["cafes in Austin, TX"]
     assert build_search_queries("", ["ice cream"], area) == ["ice cream"]
+
+
+def test_email_stages_merge_and_prefer_hiring_address():
+    row = ContactResult(
+        title="Joe's",
+        website="https://joesdiner.com",
+        emails=["info@joesdiner.com"],
+        email_sources={"info@joesdiner.com": SOURCE_SITE},
+    )
+    assert _needs_better_email(row)
+
+    # Duplicate info@ is not added twice; the manager address comes from FB.
+    added = _add_emails(
+        row, ["manager@joesdiner.com", "INFO@joesdiner.com"], SOURCE_FB_PAGE
+    )
+    assert added == ["manager@joesdiner.com"]
+    assert row.email_sources["manager@joesdiner.com"] == SOURCE_FB_PAGE
+    assert row.emails.count("info@joesdiner.com") == 1
+    assert not _needs_better_email(row)
+    assert row.primary_email == "manager@joesdiner.com"

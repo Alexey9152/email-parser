@@ -6,7 +6,7 @@ import dataclasses
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .categories import build_queries
@@ -24,15 +24,20 @@ from .guess import EmailGuesser
 from .http_client import HttpClient
 from .maps import build_provider
 from .models import (
-    STATUS_FB,
-    STATUS_GUESS,
-    STATUS_JS,
+    SOURCE_FB_PAGE,
+    SOURCE_FB_SNIPPET,
+    SOURCE_GUESS,
+    SOURCE_SEARCH,
+    SOURCE_SITE,
+    SOURCE_SITE_JS,
+    SOURCE_STATUS,
     STATUS_NOT_FOUND,
-    STATUS_SEARCH,
     STATUS_SITE,
     ContactResult,
     Restaurant,
+    is_hiring_email,
 )
+from .progress import ProgressTracker
 from .serp import build_web_search
 from .utils import (
     Area,
@@ -42,7 +47,7 @@ from .utils import (
     registrable_domain,
     unique,
 )
-from .website import WebsiteCrawler, WebsiteResult
+from .website import WebsiteCrawler
 
 log = logging.getLogger(__name__)
 
@@ -198,6 +203,70 @@ def _empty_result(restaurant: Restaurant) -> ContactResult:
     )
 
 
+def _progress_update(progress: ProgressTracker | None, **values) -> None:
+    if progress is not None:
+        progress.update(**values)
+
+
+def _count_found(results: list[ContactResult]) -> int:
+    return sum(1 for row in results if row.primary_email)
+
+
+def _add_emails(row: ContactResult, emails: list[str], source: str) -> list[str]:
+    """Merge addresses into a row, keeping the first source of each address."""
+    added: list[str] = []
+    for raw in emails:
+        email = (raw or "").strip().lower()
+        if not email or "@" not in email:
+            continue
+        row.email_sources.setdefault(email, source)
+        if email not in row.emails:
+            added.append(email)
+    if added:
+        row.emails = unique(row.emails + added)
+        note = _source_note(source)
+        if note:
+            row.sources = unique(row.sources + [note])
+    return added
+
+
+def _source_note(source: str) -> str:
+    return {
+        SOURCE_SITE: "website",
+        SOURCE_SITE_JS: "website (js render)",
+        SOURCE_FB_PAGE: "facebook (page render)",
+        SOURCE_FB_SNIPPET: "facebook (search snippet)",
+        SOURCE_SEARCH: "web search",
+        SOURCE_GUESS: "pattern guess (MX ok)",
+    }.get(source, "")
+
+
+def _needs_better_email(row: ContactResult) -> bool:
+    """A generic info@ is not enough: a manager/hiring address is preferred."""
+    return not row.emails or not any(is_hiring_email(email) for email in row.emails)
+
+
+def _facebook_email_query(title: str, city: str) -> list[tuple[str, str]]:
+    location = f' "{clean_whitespace(city)}"' if city else ""
+    return [
+        (
+            "facebook",
+            f'site:facebook.com "{clean_whitespace(title)}"{location} email',
+        )
+    ]
+
+
+def _default_source(row: ContactResult) -> str:
+    notes = " ".join(row.sources).lower()
+    if "facebook" in notes:
+        return SOURCE_FB_PAGE
+    if "js render" in notes:
+        return SOURCE_SITE_JS
+    if row.website:
+        return SOURCE_SITE
+    return SOURCE_SEARCH
+
+
 def enrich_restaurants(
     settings: Settings,
     restaurants: list[Restaurant],
@@ -210,6 +279,7 @@ def enrich_restaurants(
     facebook_limit: int = 60,
     guess: bool = False,
     workers: int | None = None,
+    progress: ProgressTracker | None = None,
 ) -> tuple[list[ContactResult], RunStats]:
     stats = RunStats(filtered=len(restaurants))
     stats.without_site = sum(1 for restaurant in restaurants if not restaurant.website)
@@ -225,9 +295,20 @@ def enrich_restaurants(
             for index, restaurant in enumerate(restaurants)
             if restaurant.website
         }
+        _progress_update(
+            progress,
+            stage="websites",
+            message="Проверяем сайты и ищем ссылки на Facebook",
+            venues_total=len(restaurants),
+            emails_found=0,
+            sites_total=len(targets),
+            sites_done=0,
+        )
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(crawler.analyze, restaurant.website): index
+                pool.submit(
+                    crawler.analyze, restaurant.website, restaurant.title
+                ): index
                 for index, restaurant in targets.items()
             }
             for done, future in enumerate(as_completed(futures), start=1):
@@ -240,20 +321,22 @@ def enrich_restaurants(
                     stats.errors += 1
                     row.note = f"site error: {exc}"[:200]
                     log.debug("crawl failed %s: %s", restaurant.website, exc)
+                    _progress_update(progress, sites_done=done)
                     continue
 
                 if site.emails:
-                    row.emails = site.emails
-                    row.status = STATUS_SITE
-                    row.sources = ["website"]
-                    stats.from_site += 1
+                    _add_emails(row, site.emails, SOURCE_SITE)
                 if site.facebook_url:
                     row.facebook_url = clean_facebook_url(site.facebook_url)
+                    restaurant.facebook_url = row.facebook_url
                 if site.blocked:
                     row.note = "website blocks bots"
                 if site.error and not row.emails:
                     row.note = site.error
 
+                _progress_update(
+                    progress, sites_done=done, emails_found=_count_found(results)
+                )
                 log.info(
                     "[%d/%d] %-45s %s",
                     done,
@@ -265,10 +348,25 @@ def enrich_restaurants(
         for index, restaurant in enumerate(restaurants):
             if not restaurant.website:
                 results[index].note = results[index].note or "нет сайта в Google Maps"
+        _progress_update(
+            progress,
+            sites_done=len(targets),
+            emails_found=_count_found(results),
+            message="Сайты проверены, ищем дополнительные адреса",
+        )
 
     # ---- search: Facebook snippets + open web ----------------------------
+    # Search not only venues without any address: an info@ on the website is
+    # often a reservations inbox, while the manager's address is on Facebook.
     pending = [index for index, row in enumerate(results) if not row.emails]
-    if use_search and pending:
+    weak = [
+        index
+        for index, row in enumerate(results)
+        if row.emails
+        and _needs_better_email(row)
+        and (not row.facebook_url or not facebook_browser)
+    ]
+    if use_search and (pending or weak):
         city = city_from_query(query)
         with HttpClient(timeout=settings.http_timeout) as search_http:
             engine = build_web_search(settings, search_http)
@@ -276,14 +374,18 @@ def enrich_restaurants(
             if not finder.enabled:
                 log.info("No search backend available - Facebook/web lookup skipped")
             else:
-                auto_budget = max(2, 2 * len(pending))
-                budget = search_limit if search_limit > 0 else min(auto_budget, settings.search_max_queries)
+                auto_budget = 2 * len(pending) + len(weak)
+                budget = (
+                    search_limit
+                    if search_limit > 0
+                    else min(auto_budget, settings.search_max_queries)
+                )
                 plans: list[tuple[int, list[tuple[str, str]]]] = []
                 used = 0
                 for index in pending:
                     if used >= budget:
                         break
-                    remaining = min(3, budget - used)
+                    remaining = min(2, budget - used)
                     plan = finder.plan(
                         restaurants[index].title,
                         city,
@@ -295,16 +397,41 @@ def enrich_restaurants(
                         continue
                     plans.append((index, plan))
                     used += len(plan)
+                for index in weak:
+                    if used >= budget:
+                        break
+                    plan = _facebook_email_query(restaurants[index].title, city)
+                    plans.append((index, plan))
+                    used += len(plan)
 
                 all_queries = unique(
                     query_text for _index, plan in plans for _kind, query_text in plan
                 )
+                _progress_update(
+                    progress,
+                    stage="search",
+                    message=(
+                        f"Google ищет адреса: {len(all_queries)} запрос(ов) "
+                        f"для {len(plans)} заведений"
+                    ),
+                    searches_total=len(all_queries),
+                    searches_done=0,
+                    emails_found=_count_found(results),
+                )
                 log.info(
-                    "Search fallback: %d quer(ies) for %d venue(s) without e-mail",
+                    "Search fallback: %d quer(ies) for %d venue(s) "
+                    "(%d without any address, %d with a generic address)",
                     len(all_queries),
                     len(plans),
+                    len(pending),
+                    len(weak),
                 )
                 hits_by_query = engine.search_many(all_queries, num=10)
+                _progress_update(
+                    progress,
+                    searches_done=len(all_queries),
+                    emails_found=_count_found(results),
+                )
                 for index, plan in plans:
                     row = results[index]
                     found = finder.evaluate(
@@ -318,21 +445,20 @@ def enrich_restaurants(
                         row.facebook_url = found.facebook_url
                         restaurants[index].facebook_url = found.facebook_url
                     if found.emails:
-                        row.emails = found.emails
-                        if found.source == "facebook":
-                            row.status = STATUS_FB
-                            row.sources = [f"facebook ({found.backend} snippet)"]
-                            stats.from_facebook += 1
-                        else:
-                            row.status = STATUS_SEARCH
-                            row.sources = [f"web search ({found.backend})"]
-                            stats.from_search += 1
-                        log.info(
-                            "  %s hit: %s -> %s",
-                            found.source,
-                            restaurants[index].title[:40],
-                            row.primary_email,
+                        source = (
+                            SOURCE_FB_SNIPPET
+                            if found.source == "facebook"
+                            else SOURCE_SEARCH
                         )
+                        added = _add_emails(row, found.emails, source)
+                        if added:
+                            log.info(
+                                "  %s hit: %s -> %s",
+                                found.source,
+                                restaurants[index].title[:40],
+                                row.primary_email,
+                            )
+                _progress_update(progress, emails_found=_count_found(results))
 
     # ---- browser stage: JS sites + Facebook pages ------------------------
     if js_fallback or facebook_browser:
@@ -346,82 +472,160 @@ def enrich_restaurants(
                         for index, row in enumerate(results)
                         if not row.emails and restaurants[index].website
                     ]
+                    _progress_update(
+                        progress,
+                        stage="js",
+                        message="Рендерим сайты в Chromium",
+                        js_total=len(js_queue),
+                        js_done=0,
+                        emails_found=_count_found(results),
+                    )
                     if js_queue:
                         log.info("JS render for %d venue(s)", len(js_queue))
-                    for index in js_queue:
+                    for done, index in enumerate(js_queue, start=1):
                         row = results[index]
                         rendered = renderer.analyze(restaurants[index].website)
                         if rendered.emails:
-                            row.emails = rendered.emails
-                            row.status = STATUS_JS
-                            row.sources = ["website (js render)"]
-                            stats.from_js += 1
+                            _add_emails(row, rendered.emails, SOURCE_SITE_JS)
                         if rendered.facebook_url and not row.facebook_url:
-                            row.facebook_url = clean_facebook_url(rendered.facebook_url)
+                            row.facebook_url = clean_facebook_url(
+                                rendered.facebook_url
+                            )
+                            restaurants[index].facebook_url = row.facebook_url
                         if rendered.blocked and not row.emails:
                             row.note = "website blocks bots"
+                        _progress_update(
+                            progress,
+                            js_done=done,
+                            emails_found=_count_found(results),
+                        )
 
                 if facebook_browser:
-                    fb_queue = [
+                    fb_candidates = [
                         index
                         for index, row in enumerate(results)
-                        if not row.emails and row.facebook_url
-                    ][: max(0, facebook_limit)]
+                        if row.facebook_url and _needs_better_email(row)
+                    ]
+                    # No address at all first, then generic info@ rows.
+                    fb_candidates.sort(
+                        key=lambda index: (
+                            bool(results[index].emails),
+                            len(results[index].emails),
+                            index,
+                        )
+                    )
+                    fb_queue = fb_candidates[: max(0, facebook_limit)]
+                    _progress_update(
+                        progress,
+                        stage="facebook",
+                        message="Открываем страницы Facebook (это медленно)",
+                        fb_total=len(fb_queue),
+                        fb_done=0,
+                        emails_found=_count_found(results),
+                    )
                     if fb_queue:
                         log.info(
                             "Facebook page render for %d venue(s) (this is slow)",
                             len(fb_queue),
                         )
-                    for index in fb_queue:
+                    for done, index in enumerate(fb_queue, start=1):
                         row = results[index]
                         rendered = renderer.analyze(
                             row.facebook_url, follow_contact=False
                         )
                         emails = filter_email_list(rendered.emails)
-                        if emails:
-                            row.emails = emails
-                            row.status = STATUS_FB
-                            row.sources = ["facebook (page render)"]
-                            stats.from_facebook += 1
+                        added = _add_emails(row, emails, SOURCE_FB_PAGE)
+                        if added:
                             log.info(
                                 "  FB page hit: %s -> %s",
                                 restaurants[index].title[:40],
                                 row.primary_email,
                             )
+                        elif rendered.blocked:
+                            row.note = row.note or "Facebook page requires login"
+                        _progress_update(
+                            progress,
+                            fb_done=done,
+                            emails_found=_count_found(results),
+                        )
         except Exception as exc:  # noqa: BLE001 - playwright missing / browser crash
             log.warning("Browser fallback unavailable: %s", exc)
 
     # ---- MX-validated pattern guessing (optional) ------------------------
     if guess:
         guesser = EmailGuesser()
+        guess_queue = [
+            index
+            for index, restaurant in enumerate(restaurants)
+            if not results[index].emails and restaurant.website
+        ]
+        _progress_update(
+            progress,
+            stage="guess",
+            message="Подбираем info@/contact@ по MX-записям",
+            guess_total=len(guess_queue),
+            guess_done=0,
+            emails_found=_count_found(results),
+        )
         guessed = 0
-        for index, restaurant in enumerate(restaurants):
+        for done, index in enumerate(guess_queue, start=1):
+            restaurant = restaurants[index]
             row = results[index]
-            if row.emails or not restaurant.website:
-                continue
             attempt = guesser.guess(restaurant.website)
-            if not attempt.emails:
+            if attempt.emails:
+                _add_emails(row, attempt.emails, SOURCE_GUESS)
+                row.note = (
+                    f"unverified; mail exchanger: {', '.join(attempt.mx[:2])}"
+                )
+                guessed += 1
+            else:
                 log.debug("no guess for %s: %s", restaurant.website, attempt.error)
-                continue
-            row.emails = attempt.emails
-            row.status = STATUS_GUESS
-            row.sources = ["pattern guess (MX ok)"]
-            row.note = f"unverified; mail exchanger: {', '.join(attempt.mx[:2])}"
-            guessed += 1
-        stats.from_guess = guessed
+            _progress_update(
+                progress, guess_done=done, emails_found=_count_found(results)
+            )
         if guessed:
             log.info("Guessed %d unverified address(es) from MX records", guessed)
 
+    # ---- final ranking / statuses / stats --------------------------------
     for row in results:
         row.emails = unique(row.emails)
+        for email in row.emails:
+            row.email_sources.setdefault(email, _default_source(row))
         if not row.emails:
             row.status = STATUS_NOT_FOUND
-            stats.not_found += 1
-        elif row.status == STATUS_NOT_FOUND:
-            row.status = STATUS_SITE
-        stats.with_email += 1 if row.emails else 0
+            continue
+        source = row.primary_email_source
+        row.status = SOURCE_STATUS.get(source, row.status or STATUS_SITE)
 
+    stats.with_email = _count_found(results)
+    stats.from_site = sum(
+        1 for row in results if row.primary_email_source == SOURCE_SITE
+    )
+    stats.from_facebook = sum(
+        1
+        for row in results
+        if row.primary_email_source in {SOURCE_FB_PAGE, SOURCE_FB_SNIPPET}
+    )
+    stats.from_search = sum(
+        1 for row in results if row.primary_email_source == SOURCE_SEARCH
+    )
+    stats.from_js = sum(
+        1 for row in results if row.primary_email_source == SOURCE_SITE_JS
+    )
+    stats.from_guess = sum(
+        1 for row in results if row.primary_email_source == SOURCE_GUESS
+    )
+    stats.not_found = sum(1 for row in results if not row.primary_email)
     stats.duration = time.time() - started
+
+    _progress_update(
+        progress,
+        emails_found=stats.with_email,
+        errors=stats.errors,
+        message=(
+            f"Найдено {stats.with_email} e-mail из {stats.filtered} заведений"
+        ),
+    )
     return results, stats
 
 
@@ -445,6 +649,7 @@ def run(
     categories: list[str] | None = None,
     area: Area | None = None,
     require_website: bool = False,
+    progress: ProgressTracker | None = None,
 ) -> tuple[list[ContactResult], RunStats]:
     data_dir = out_dir or settings.ensure_data_dir()
     data_dir = Path(data_dir)
@@ -452,6 +657,12 @@ def run(
     stats = RunStats()
 
     if stage in {"all", "maps"}:
+        _progress_update(
+            progress,
+            stage="maps",
+            message="Собираем заведения в Google Maps",
+            emails_found=0,
+        )
         raw = collect_restaurants(
             settings,
             query,
@@ -467,6 +678,7 @@ def run(
         )
         save_restaurants_json(data_dir / "restaurants_list.json", restaurants)
         stats.filtered = len(restaurants)
+        _progress_update(progress, venues_total=len(restaurants))
         log.info(
             "Filtered %d -> %d venues (%d without a website kept)",
             stats.raw,
@@ -477,9 +689,15 @@ def run(
         source = input_path or (data_dir / "restaurants_list.json")
         restaurants = load_restaurants(Path(source))
         stats.filtered = len(restaurants)
+        _progress_update(progress, venues_total=len(restaurants))
         log.info("Loaded %d venues from %s", len(restaurants), source)
 
     if stage == "maps":
+        _progress_update(
+            progress,
+            stage="done",
+            message=f"Собрано {stats.filtered} заведений",
+        )
         return [], stats
 
     results, enrich_stats = enrich_restaurants(
@@ -493,6 +711,7 @@ def run(
         facebook_limit=facebook_limit,
         guess=guess,
         workers=workers,
+        progress=progress,
     )
     enrich_stats.raw = stats.raw or stats.filtered
 
@@ -504,9 +723,24 @@ def run(
         "categories": categories or [],
         "stats": enrich_stats.as_dict(),
     }
+    _progress_update(
+        progress,
+        stage="export",
+        message="Сохраняем Excel, CSV и JSON",
+        emails_found=enrich_stats.with_email,
+    )
     save_results_csv(data_dir / "final_contacts.csv", results)
     save_results_json(data_dir / "final_contacts.json", results)
     save_results_xlsx(data_dir / "final_contacts.xlsx", results, meta)
+    _progress_update(
+        progress,
+        stage="done",
+        message=(
+            f"Готово: {enrich_stats.with_email} e-mail из "
+            f"{enrich_stats.filtered} заведений"
+        ),
+        emails_found=enrich_stats.with_email,
+    )
     log.info(
         "Done in %.1fs: %d with e-mail (site %d, fb %d, search %d, js %d, guessed %d), "
         "%d not found, %d errors",

@@ -27,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
             '  python main.py --bbox "38.32,-75.10,38.40,-75.03" --all-food --limit 300\n'
             '  python main.py -q "Austin, TX" --categories "ice cream,shawarma,cocktail bar"\n'
             "  python main.py --stage emails --input data/restaurants_list.json --js\n"
+            "  python main.py send --input data/final_contacts.xlsx\n"
+            "  python main.py send --input data/final_contacts.xlsx --resume data/Resume.pdf --send\n"
             "  python main.py --list-categories\n"
             "  python ui.py   (map-based UI in the browser)\n"
         ),
@@ -86,7 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-search",
         action="store_true",
-        help="skip Facebook/web search for venues without an e-mail on the site",
+        help=(
+            "skip Google/Facebook search; generic site addresses are then left "
+            "as they are"
+        ),
     )
     parser.add_argument(
         "--search-limit",
@@ -135,6 +140,12 @@ def _print_categories() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # ``send`` has its own parser and does not need the Maps options.
+    if argv and argv[0] in {"send", "mail"}:
+        from .mailer import main as mailer_main
+
+        return mailer_main(argv[1:])
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose > 1 else logging.INFO if args.verbose else logging.WARNING,

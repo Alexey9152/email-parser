@@ -62,7 +62,10 @@ def city_from_query(query: str) -> str:
     if match:
         return clean_whitespace(match.group(1))
     parts = [p.strip() for p in (query or "").split(",") if p.strip()]
-    return parts[-1] if len(parts) > 1 else ""
+    if len(parts) > 1:
+        # A plain "Ocean City, MD" is already a location.
+        return clean_whitespace(query)
+    return ""
 
 
 def unique(items) -> list:
