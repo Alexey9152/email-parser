@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .categories import build_queries
 from .config import Settings
@@ -246,6 +248,24 @@ def _needs_better_email(row: ContactResult) -> bool:
     return not row.emails or not any(is_hiring_email(email) for email in row.emails)
 
 
+def _facebook_page_matches(page_url: str, emails: list[str]) -> bool:
+    """Check that the local parts look like they belong to *this* page.
+
+    Facebook login interstitials and redirects sometimes render another page;
+    if the slug/title tokens are nowhere in the addresses, the addresses are
+    dropped instead of being written to the report.
+    """
+    slug = urlsplit(page_url or "").path.strip("/").split("/")[0].lower()
+    if not slug or slug.isdigit():
+        # Numeric page ids carry no name hints at all.
+        return True
+    tokens = [token for token in re.split(r"[^a-z0-9]+", slug) if len(token) >= 3]
+    if not tokens:
+        return True
+    joined = " ".join(emails).lower()
+    return any(token in joined for token in tokens)
+
+
 def _facebook_email_query(title: str, city: str) -> list[tuple[str, str]]:
     location = f' "{clean_whitespace(city)}"' if city else ""
     return [
@@ -440,6 +460,7 @@ def enrich_restaurants(
                         hits_by_query,
                         backend="google",
                         facebook_url=row.facebook_url,
+                        restaurant_website=restaurants[index].website,
                     )
                     if found.facebook_url and not row.facebook_url:
                         row.facebook_url = found.facebook_url
@@ -458,6 +479,13 @@ def enrich_restaurants(
                                 restaurants[index].title[:40],
                                 row.primary_email,
                             )
+                    elif found.unreliable and not row.emails:
+                        # Snippets listed other venues; the browser stage should
+                        # open this page and read the real contact block.
+                        row.note = (
+                            "search snippets belonged to other venues; "
+                            "checking the page in a browser"
+                        )
                 _progress_update(progress, emails_found=_count_found(results))
 
     # ---- browser stage: JS sites + Facebook pages ------------------------
@@ -504,7 +532,14 @@ def enrich_restaurants(
                     fb_candidates = [
                         index
                         for index, row in enumerate(results)
-                        if row.facebook_url and _needs_better_email(row)
+                        if row.facebook_url
+                        and (
+                            _needs_better_email(row)
+                            # A snippet address is kept, but the page render is
+                            # more trustworthy; never skip a page because a weak
+                            # snippet already produced an address.
+                            or not row.emails
+                        )
                     ]
                     # No address at all first, then generic info@ rows.
                     fb_candidates.sort(
@@ -530,10 +565,23 @@ def enrich_restaurants(
                         )
                     for done, index in enumerate(fb_queue, start=1):
                         row = results[index]
-                        rendered = renderer.analyze(
-                            row.facebook_url, follow_contact=False
-                        )
+                        page_url = row.facebook_url
+                        rendered = renderer.analyze(page_url, follow_contact=False)
+                        # Facebook often shows a login interstitial on the first
+                        # hit; give a useful page one retry before giving up.
+                        if (rendered.blocked or not rendered.emails) and _needs_better_email(row):
+                            time.sleep(1.5)
+                            retry = renderer.analyze(page_url, follow_contact=False)
+                            if retry.emails and len(retry.emails) >= len(rendered.emails):
+                                rendered = retry
+                            elif not rendered.emails:
+                                rendered = retry
                         emails = filter_email_list(rendered.emails)
+                        if emails and not _facebook_page_matches(page_url, emails):
+                            row.note = (
+                                "Facebook page e-mail ignored: page identity unverified"
+                            )
+                            emails = []
                         added = _add_emails(row, emails, SOURCE_FB_PAGE)
                         if added:
                             log.info(
@@ -543,6 +591,8 @@ def enrich_restaurants(
                             )
                         elif rendered.blocked:
                             row.note = row.note or "Facebook page requires login"
+                        elif not emails:
+                            row.note = row.note or "Facebook page has no public e-mail"
                         _progress_update(
                             progress,
                             fb_done=done,

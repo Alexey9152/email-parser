@@ -64,9 +64,59 @@ def test_web_hits_must_be_relevant():
     hits = {
         "q": [
             SearchHit(title="Some other restaurant", snippet="owner@example.com"),
-            SearchHit(title="Coastal Salt", snippet="hello@coastalsaltoc.com"),
+            SearchHit(
+                title="Coastal Salt",
+                snippet="hello@coastalsaltoc.com",
+                link="https://coastalsaltoc.com/contact",
+            ),
         ]
     }
-    result = finder.evaluate("Coastal Salt", plan, hits)
+    result = finder.evaluate(
+        "Coastal Salt",
+        plan,
+        hits,
+        restaurant_website="https://coastalsaltoc.com/",
+    )
     assert result.emails == ["hello@coastalsaltoc.com"]
+    assert result.source == "web"
+
+
+def test_aggregate_facebook_page_emails_are_rejected():
+    """A category page lists dozens of venues: its snippet must be ignored."""
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                title="Seafood Restaurants in Ocean City, MD",
+                snippet="pearsonsseafood@gmail.com alluse@aol.com",
+                link="https://www.facebook.com/pages/category/Seafood-Restaurant/",
+            )
+        ]
+    }
+    result = finder.evaluate("OC Uptown Eats", plan, hits)
+    assert result.emails == []
+    assert result.unreliable
+
+
+def test_web_hits_must_match_known_facebook_page():
+    finder = SocialEmailFinder(None)
+    plan = [("web", "q")]
+    hits = {
+        "q": [
+            SearchHit(title="Some other restaurant", snippet="other@gmail.com"),
+            SearchHit(
+                title="OC Uptown Eats",
+                snippet="alluse@aol.com",
+                link="https://www.facebook.com/409248996222954",
+            ),
+        ]
+    }
+    result = finder.evaluate(
+        "OC Uptown Eats",
+        plan,
+        hits,
+        facebook_url="https://www.facebook.com/409248996222954",
+    )
+    assert result.emails == ["alluse@aol.com"]
     assert result.source == "web"
