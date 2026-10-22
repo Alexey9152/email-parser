@@ -1,20 +1,22 @@
 """Free Google Maps scraping through Playwright.
 
-This backend is deliberately conservative: it never logs in, does one query per
-run and reads the public place cards. Google changes the DOM often and may show
-a consent wall or a captcha, so treat failures as expected and fall back to
-Apify/Outscraper for production volumes.
+This backend is deliberately conservative: it never logs in, reads the public
+place cards and reuses one browser for all category queries. Google changes the
+DOM often and may show a consent wall or a captcha, so treat failures as
+expected and fall back to Apify/Outscraper for production volumes.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import re
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from ..models import Restaurant
-from ..utils import clean_whitespace, unique
-from .base import MapsProviderError
+from ..utils import Area, clean_whitespace, coords_from_maps_url, unique
+from .base import MapsProviderBase, MapsProviderError
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +34,7 @@ DETAIL_SELECTORS = {
 }
 
 
-class PlaywrightMapsProvider:
+class PlaywrightMapsProvider(MapsProviderBase):
     name = "playwright"
 
     def __init__(self, headless: bool = True, language: str = "en", locale: str = "en-US"):
@@ -40,12 +42,25 @@ class PlaywrightMapsProvider:
         self.language = language
         self.locale = locale
 
-    def search(self, query: str, limit: int) -> list[Restaurant]:
+    # -- protocol ----------------------------------------------------------
+    def search(
+        self, query: str, limit: int, area: Area | None = None
+    ) -> list[Restaurant]:
+        return self.search_many([query], limit, area)
+
+    def search_many(
+        self, queries: list[str], limit: int, area: Area | None = None
+    ) -> list[Restaurant]:
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
         from playwright.sync_api import sync_playwright
 
+        queries = [q for q in queries if q.strip()]
         limit = max(1, limit)
+        if not queries:
+            return []
+        per_query = max(5, math.ceil(limit / len(queries)))
+
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=self.headless,
@@ -64,15 +79,36 @@ class PlaywrightMapsProvider:
             )
             page = context.new_page()
             try:
-                place_urls = self._collect_place_urls(page, query, limit)
-                log.info("Google Maps: %d place links found", len(place_urls))
+                place_urls: list[str] = []
+                query_by_url: dict[str, str] = {}
+                for index, query in enumerate(queries, start=1):
+                    if len(place_urls) >= limit:
+                        break
+                    log.info(
+                        "Maps query %d/%d: %s", index, len(queries), query
+                    )
+                    found = self._collect_place_urls(
+                        page, query, per_query, area
+                    )
+                    log.info("  %d place link(s)", len(found))
+                    for url in found:
+                        query_by_url.setdefault(url, query)
+                    place_urls = unique(place_urls + found)
+
+                place_urls = place_urls[:limit]
+                log.info("Google Maps: %d unique places to open", len(place_urls))
                 restaurants: list[Restaurant] = []
                 detail = context.new_page()
-                for index, url in enumerate(place_urls[:limit], start=1):
-                    item = self._read_place(detail, url, query)
+                for index, url in enumerate(place_urls, start=1):
+                    item = self._read_place(
+                        detail, url, query_by_url.get(url, queries[0])
+                    )
                     if item and item.title:
+                        if area is not None and item.latitude is not None and item.longitude is not None:
+                            if not area.contains(item.latitude, item.longitude):
+                                continue
                         restaurants.append(item)
-                        log.info("[%d/%d] %s", index, len(place_urls[:limit]), item.title)
+                        log.info("[%d/%d] %s", index, len(place_urls), item.title)
                     time.sleep(0.2)
                 return restaurants
             except PlaywrightTimeout as exc:
@@ -84,11 +120,10 @@ class PlaywrightMapsProvider:
                 browser.close()
 
     # -- list page ---------------------------------------------------------
-    def _collect_place_urls(self, page, query: str, limit: int) -> list[str]:
-        url = (
-            "https://www.google.com/maps/search/"
-            f"{quote(query)}?hl={self.language}&gl=us"
-        )
+    def _collect_place_urls(
+        self, page, query: str, limit: int, area: Area | None
+    ) -> list[str]:
+        url = self._search_url(query, area)
         page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         self._dismiss_consent(page)
 
@@ -105,7 +140,6 @@ class PlaywrightMapsProvider:
                     "Google Maps blocked the request (captcha/unusual traffic). "
                     "Switch provider or run with --headed."
                 )
-            # A single result opens the place page directly.
             if "/maps/place/" in page.url:
                 return [page.url]
             raise MapsProviderError("Could not find the Maps results list.")
@@ -113,12 +147,13 @@ class PlaywrightMapsProvider:
         feed = page.locator('div[role="feed"]')
         seen: list[str] = []
         idle_rounds = 0
-        for _ in range(60):
+        for _ in range(40):
             hrefs = feed.locator('a[href*="/maps/place/"]').evaluate_all(
                 "els => els.map(e => e.href)"
             )
             before = len(seen)
-            seen = unique(seen + list(hrefs))
+            seen = unique(seen + [self._canonical(href) for href in hrefs])
+            seen = [href for href in seen if self._in_area(href, area)]
             if len(seen) >= limit:
                 break
             if len(seen) == before:
@@ -129,7 +164,34 @@ class PlaywrightMapsProvider:
                 break
             feed.evaluate("el => el.scrollBy(0, el.scrollHeight)")
             page.wait_for_timeout(1200)
-        return seen
+        return seen[:limit]
+
+    def _search_url(self, query: str, area: Area | None) -> str:
+        base = f"https://www.google.com/maps/search/{quote(query)}"
+        if area is not None:
+            lat, lng = area.center
+            base += f"/@{lat:.6f},{lng:.6f},{self._zoom(area)}z"
+        return f"{base}?hl={self.language}&gl=us"
+
+    @staticmethod
+    def _zoom(area: Area) -> int:
+        radius = max(area.approximate_radius_km(), 0.2)
+        zoom = int(round(15 - math.log2(radius)))
+        return max(10, min(17, zoom))
+
+    @staticmethod
+    def _canonical(url: str) -> str:
+        parts = urlsplit(url)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+    @staticmethod
+    def _in_area(url: str, area: Area | None) -> bool:
+        if area is None:
+            return True
+        coords = coords_from_maps_url(url)
+        if coords is None:
+            return True
+        return area.contains(*coords)
 
     # -- detail page -------------------------------------------------------
     def _read_place(self, page, url: str, query: str) -> Restaurant | None:
@@ -166,6 +228,8 @@ class PlaywrightMapsProvider:
         except Exception:
             pass
 
+        rating, reviews = self._rating(page)
+        coords = coords_from_maps_url(page.url) or coords_from_maps_url(url)
         return Restaurant(
             title=clean_whitespace(title),
             address=address,
@@ -174,7 +238,47 @@ class PlaywrightMapsProvider:
             google_maps_url=page.url,
             category=category,
             source_query=query,
+            rating=rating,
+            reviews=reviews,
+            latitude=coords[0] if coords else None,
+            longitude=coords[1] if coords else None,
+            place_id=self._place_id(url),
         )
+
+    @staticmethod
+    def _rating(page) -> tuple[float | None, int | None]:
+        rating: float | None = None
+        reviews: int | None = None
+        try:
+            text = page.locator("div.F7nice").first.inner_text(timeout=2_000)
+        except Exception:
+            text = ""
+        if not text:
+            try:
+                text = page.locator('div[role="img"][aria-label*="star"]').first.get_attribute(
+                    "aria-label"
+                ) or ""
+            except Exception:
+                text = ""
+        match = re.search(r"(\d(?:[.,]\d)?)", text)
+        if match:
+            try:
+                rating = float(match.group(1).replace(",", "."))
+            except ValueError:
+                rating = None
+        reviews_match = re.search(r"\(([\d.,\s]+)\)", text)
+        if reviews_match:
+            digits = re.sub(r"\D", "", reviews_match.group(1))
+            reviews = int(digits) if digits else None
+        return rating, reviews
+
+    @staticmethod
+    def _place_id(url: str) -> str:
+        match = re.search(r"!19s([\w-]+)", url or "")
+        if match:
+            return match.group(1)
+        match = re.search(r"place_id:([\w-]+)", url or "")
+        return match.group(1) if match else ""
 
     # -- helpers -----------------------------------------------------------
     @staticmethod

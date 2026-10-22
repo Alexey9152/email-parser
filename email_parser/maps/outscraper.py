@@ -8,14 +8,15 @@ from typing import Any
 import httpx
 
 from ..models import Restaurant
-from .base import MapsProviderError
+from ..utils import Area, clean_whitespace
+from .base import MapsProviderBase, MapsProviderError
 
 log = logging.getLogger(__name__)
 
 OUTSCRAPER_API = "https://api.outscraper.com/maps/search-v3"
 
 
-class OutscraperProvider:
+class OutscraperProvider(MapsProviderBase):
     name = "outscraper"
 
     def __init__(self, api_key: str, timeout: float = 300):
@@ -26,7 +27,11 @@ class OutscraperProvider:
         self.api_key = api_key
         self.timeout = timeout
 
-    def search(self, query: str, limit: int) -> list[Restaurant]:
+    def search(
+        self, query: str, limit: int, area: Area | None = None
+    ) -> list[Restaurant]:
+        if area is not None:
+            log.warning("Outscraper backend ignores the map area (provider limitation)")
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(
                 OUTSCRAPER_API,
@@ -57,12 +62,32 @@ class OutscraperProvider:
             return None
         return Restaurant(
             title=title,
-            address=(item.get("full_address") or item.get("address") or "").strip(),
+            address=clean_whitespace(
+                str(item.get("full_address") or item.get("address") or "")
+            ),
             phone=str(item.get("phone") or "").strip(),
             website=(item.get("site") or item.get("website") or "").strip(),
             google_maps_url=(
                 item.get("location_link") or item.get("google_maps_url") or ""
             ).strip(),
-            category=(item.get("type") or item.get("category") or "").strip(),
+            category=clean_whitespace(str(item.get("type") or item.get("category") or "")),
             source_query=query,
+            rating=_to_float(item.get("rating")),
+            reviews=_to_int(item.get("reviews") or item.get("reviews_count")),
+            price=clean_whitespace(str(item.get("price") or "")),
+            latitude=_to_float(item.get("latitude")),
+            longitude=_to_float(item.get("longitude")),
+            place_id=str(item.get("place_id") or ""),
         )
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> int | None:
+    number = _to_float(value)
+    return int(number) if number is not None else None

@@ -1,8 +1,10 @@
-"""Small helpers: URL normalisation, domain parsing, text cleanup."""
+"""Small helpers: URL normalisation, domain parsing, geo maths."""
 
 from __future__ import annotations
 
+import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -85,3 +87,84 @@ def ensure_parent(path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ------------------------------------------------------------------- geography
+@dataclass(frozen=True, slots=True)
+class Area:
+    """Rectangular search area in WGS84 degrees."""
+
+    south: float
+    west: float
+    north: float
+    east: float
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        if not (-90 <= self.south < self.north <= 90):
+            raise ValueError("bbox latitudes must satisfy -90 <= south < north <= 90")
+        if not (-180 <= self.west < self.east <= 180):
+            raise ValueError("bbox longitudes must satisfy -180 <= west < east <= 180")
+
+    @property
+    def center(self) -> tuple[float, float]:
+        return (self.south + self.north) / 2, (self.west + self.east) / 2
+
+    def contains(self, latitude: float, longitude: float) -> bool:
+        return self.south <= latitude <= self.north and self.west <= longitude <= self.east
+
+    def polygon(self) -> list[list[float]]:
+        """Closed GeoJSON ring in [longitude, latitude] order (Apify requirement)."""
+        return [
+            [self.west, self.south],
+            [self.east, self.south],
+            [self.east, self.north],
+            [self.west, self.north],
+            [self.west, self.south],
+        ]
+
+    def geojson(self) -> dict:
+        return {"type": "Polygon", "coordinates": [self.polygon()]}
+
+    def as_text(self) -> str:
+        return f"{self.south:.6f},{self.west:.6f},{self.north:.6f},{self.east:.6f}"
+
+    def approximate_radius_km(self) -> float:
+        lat_km = (self.north - self.south) * 111.0
+        lng_km = (self.east - self.west) * 111.0 * math.cos(math.radians(self.center[0]))
+        return round(max(lat_km, lng_km) / 2, 1)
+
+
+def parse_bbox(value: str) -> Area | None:
+    """Parse 'south,west,north,east' (min_lat,min_lng,max_lat,max_lng)."""
+    if not value:
+        return None
+    parts = [p.strip() for p in value.replace(";", ",").split(",") if p.strip()]
+    if len(parts) != 4:
+        raise ValueError(
+            "bbox must be four numbers: south,west,north,east "
+            "(min_lat,min_lng,max_lat,max_lng)"
+        )
+    try:
+        south, west, north, east = (float(p) for p in parts)
+    except ValueError as exc:
+        raise ValueError(f"bbox is not numeric: {value!r}") from exc
+    return Area(south=south, west=west, north=north, east=east)
+
+
+_COORD_PATTERNS = (
+    re.compile(r"!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)"),
+    re.compile(r"@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)"),
+)
+
+
+def coords_from_maps_url(url: str) -> tuple[float, float] | None:
+    """Google Maps links carry the point as !3d<lat>!4d<lng> or @<lat>,<lng>."""
+    for pattern in _COORD_PATTERNS:
+        match = pattern.search(url or "")
+        if match:
+            try:
+                return float(match.group(1)), float(match.group(2))
+            except ValueError:
+                continue
+    return None

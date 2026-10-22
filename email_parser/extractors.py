@@ -9,7 +9,7 @@ import html as html_lib
 import json
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -51,6 +51,9 @@ _OBFUSCATION = (
 )
 _ESCAPED_AT = re.compile(r"\\u0040|%40", re.IGNORECASE)
 _ESCAPED_DOT = re.compile(r"\\u002e|%2e", re.IGNORECASE)
+# JSON/JS escapes such as \u003e leak into page text and turn into junk locals.
+_JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+JUNK_LOCAL_PREFIX_RE = re.compile(r"^u00[0-9a-f]{2}", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -59,11 +62,19 @@ class Link:
     text: str = ""
 
 
+def _decode_json_escape(match: re.Match[str]) -> str:
+    try:
+        return chr(int(match.group(1), 16))
+    except ValueError:  # pragma: no cover - regex guarantees hex
+        return match.group(0)
+
+
 def deobfuscate(text: str) -> str:
     for pattern, replacement in _OBFUSCATION:
         text = pattern.sub(replacement, text)
     text = _ESCAPED_AT.sub("@", text)
     text = _ESCAPED_DOT.sub(".", text)
+    text = _JSON_ESCAPE.sub(_decode_json_escape, text)
     return text
 
 
@@ -99,6 +110,8 @@ def normalize_email(raw: str) -> str:
     if local in JUNK_LOCAL_PARTS:
         return ""
     if HEX_LOCAL_RE.match(local):
+        return ""
+    if JUNK_LOCAL_PREFIX_RE.match(local):
         return ""
     # Domains made only of digits (e.g. 123456@2x.png leftovers) are never real.
     if re.fullmatch(r"[\d.]+", domain):
@@ -275,8 +288,21 @@ def social_links(links: list[Link]) -> dict[str, str]:
     return found
 
 
+FB_ENDPOINT_PATHS = {
+    "profile.php", "permalink.php", "photo.php", "story.php", "l.php",
+    "watch", "reel", "share", "sharer", "login", "groups", "events",
+    "hashtag", "marketplace", "gaming", "dialog", "plugins",
+}
+FB_LEGACY_PREFIXES = {"pages", "people", "public"}
+
+
 def clean_facebook_url(url: str) -> str:
-    """Accept fb.com / m.facebook.com and return a canonical profile URL."""
+    """Accept fb.com / m.facebook.com and return a canonical *profile* URL.
+
+    Search results often point to a post or to a profile sub-tab; the pipeline
+    opens these URLs in a browser, so a post link is reduced to its page slug
+    and endpoint links without an id are rejected.
+    """
     candidate = normalize_url(url)
     if not candidate:
         return ""
@@ -287,4 +313,25 @@ def clean_facebook_url(url: str) -> str:
     path = parts.path.rstrip("/")
     if not path or not _is_social_page(host, path):
         return ""
-    return f"https://www.facebook.com{path}"
+
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return ""
+    first = segments[0].lower()
+    query = parse_qs(parts.query)
+
+    if first.endswith(".php") or first in FB_ENDPOINT_PATHS:
+        page_id = (query.get("id") or [""])[0].strip()
+        if first == "profile.php" and page_id.isdigit():
+            return f"https://www.facebook.com/profile.php?id={page_id}"
+        return ""
+
+    if first in FB_LEGACY_PREFIXES:
+        # /pages/Name/123 and /people/Name/123 are valid multi-segment URLs.
+        return f"https://www.facebook.com{path}" if len(segments) >= 3 else ""
+
+    slug = segments[0]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", slug):
+        return ""
+    # Drop sub-tabs like /posts/..., /photos/..., /reviews or /e.
+    return f"https://www.facebook.com/{slug}"

@@ -44,11 +44,14 @@ class Settings:
     maps_provider: str = "playwright"
     apify_token: str = ""
     apify_actor: str = "compass/crawler-google-places"
+    apify_search_actor: str = "apify/google-search-scraper"
     outscraper_key: str = ""
     serpapi_key: str = ""
     search_backend: str = "auto"
     search_delay: float = 4.0
     search_cooldown: float = 120.0
+    search_timeout: float = 420.0
+    search_max_queries: int = 400
 
     http_timeout: float = 15.0
     http_workers: int = 8
@@ -62,11 +65,14 @@ class Settings:
             maps_provider=_env("MAPS_PROVIDER", "playwright").lower(),
             apify_token=_env("APIFY_TOKEN"),
             apify_actor=_env("APIFY_ACTOR", "compass/crawler-google-places"),
+            apify_search_actor=_env("APIFY_SEARCH_ACTOR", "apify/google-search-scraper"),
             outscraper_key=_env("OUTSCRAPER_API_KEY"),
             serpapi_key=_env("SERPAPI_KEY"),
             search_backend=_env("SEARCH_BACKEND", "auto").lower(),
             search_delay=_env_float("SEARCH_DELAY", 4.0),
             search_cooldown=_env_float("SEARCH_COOLDOWN", 120.0),
+            search_timeout=_env_float("SEARCH_TIMEOUT", 420.0),
+            search_max_queries=max(10, _env_int("SEARCH_MAX_QUERIES", 400)),
             http_timeout=_env_float("HTTP_TIMEOUT", 15.0),
             http_workers=max(1, _env_int("HTTP_WORKERS", 8)),
             headless=_env_bool("HEADLESS", True),

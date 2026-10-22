@@ -25,6 +25,13 @@ class Restaurant:
     google_maps_url: str = ""
     category: str = ""
     source_query: str = ""
+    facebook_url: str = ""
+    rating: float | None = None
+    reviews: int | None = None
+    price: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
+    place_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -49,6 +56,14 @@ class ContactResult:
     sources: list[str] = field(default_factory=list)
     google_maps_url: str = ""
     note: str = ""
+    category: str = ""
+    rating: float | None = None
+    reviews: int | None = None
+    price: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
+    place_id: str = ""
+    source_query: str = ""
 
     @property
     def primary_email(self) -> str:

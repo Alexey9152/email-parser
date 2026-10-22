@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from email_parser.extractors import (
+    clean_facebook_url,
     collect_links,
     contact_links,
     emails_from_page,
@@ -76,3 +77,23 @@ def test_json_ld_meta_and_script_emails():
 def test_percent_encoded_address():
     assert normalize_email("info%40joesdiner.com") == "info@joesdiner.com"
     assert extract_emails("mail: manager%40joesdiner.com") == ["manager@joesdiner.com"]
+
+
+def test_json_escapes_do_not_leak_into_local_part():
+    emails = extract_emails('var x = "\\u003einfo@flamingocoastoc.com";')
+    assert emails == ["info@flamingocoastoc.com"]
+
+
+def test_facebook_urls_are_reduced_to_page_profiles():
+    post = "https://www.facebook.com/ocfun/posts/we-saw-what-you-did/1547103114116417"
+    assert clean_facebook_url(post) == "https://www.facebook.com/ocfun"
+    assert clean_facebook_url("https://m.facebook.com/joesdiner/e") == "https://www.facebook.com/joesdiner"
+    assert clean_facebook_url("https://www.facebook.com/profile.php") == ""
+    assert (
+        clean_facebook_url("https://facebook.com/profile.php?id=100012345")
+        == "https://www.facebook.com/profile.php?id=100012345"
+    )
+    assert (
+        clean_facebook_url("https://www.facebook.com/pages/Joes/123456")
+        == "https://www.facebook.com/pages/Joes/123456"
+    )

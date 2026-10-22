@@ -1,4 +1,4 @@
-"""Pipeline: Maps -> filter -> website crawl -> Facebook fallback -> export."""
+"""Pipeline: Maps -> filter -> website crawl -> search/Facebook -> export."""
 
 from __future__ import annotations
 
@@ -9,15 +9,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .categories import build_queries
 from .config import Settings
 from .exporter import (
     load_restaurants,
     save_restaurants_json,
     save_results_csv,
     save_results_json,
+    save_results_xlsx,
 )
 from .extractors import clean_facebook_url
-from .facebook import SocialEmailFinder
+from .facebook import SocialEmailFinder, filter_email_list
 from .guess import EmailGuesser
 from .http_client import HttpClient
 from .maps import build_provider
@@ -32,7 +34,14 @@ from .models import (
     Restaurant,
 )
 from .serp import build_web_search
-from .utils import city_from_query, normalize_url, registrable_domain, unique
+from .utils import (
+    Area,
+    city_from_query,
+    clean_whitespace,
+    normalize_url,
+    registrable_domain,
+    unique,
+)
 from .website import WebsiteCrawler, WebsiteResult
 
 log = logging.getLogger(__name__)
@@ -50,6 +59,7 @@ AGGREGATORS = (
 class RunStats:
     raw: int = 0
     filtered: int = 0
+    without_site: int = 0
     with_email: int = 0
     from_site: int = 0
     from_facebook: int = 0
@@ -65,13 +75,47 @@ class RunStats:
 
 
 # ---------------------------------------------------------------- maps stage
+def build_search_queries(
+    query: str, categories: list[str] | None = None, area: Area | None = None
+) -> list[str]:
+    """Turn CLI/UI input into the actual list of Google Maps search strings."""
+    categories = [c for c in (categories or []) if c.strip()]
+    if categories:
+        # A drawn area defines the place, so plain categories search the polygon
+        # instead of an unrelated "in City" text restriction.
+        if area is not None:
+            return list(unique(categories))
+        return build_queries(query, categories)
+    return [query] if (query or "").strip() else []
+
+
 def collect_restaurants(
-    settings: Settings, query: str, limit: int, provider_name: str | None = None
+    settings: Settings,
+    query: str = "",
+    limit: int = 40,
+    provider_name: str | None = None,
+    categories: list[str] | None = None,
+    area: Area | None = None,
 ) -> list[Restaurant]:
     provider = build_provider(settings, provider_name)
-    log.info("Provider: %s | query: %r | limit: %d", provider.name, query, limit)
+    queries = build_search_queries(query, categories, area)
+    if not queries:
+        raise ValueError(
+            "Nothing to search: pass --query, --categories with a location, "
+            "or --categories with --bbox"
+        )
+    log.info(
+        "Provider: %s | %d quer(ies) | limit: %d | area: %s",
+        provider.name,
+        len(queries),
+        limit,
+        area.as_text() if area else "—",
+    )
     started = time.time()
-    items = provider.search(query, limit)
+    if len(queries) == 1:
+        items = provider.search(queries[0], limit, area)
+    else:
+        items = provider.search_many(queries, limit, area)
     log.info("Maps returned %d venues in %.1fs", len(items), time.time() - started)
     return items
 
@@ -83,23 +127,49 @@ def is_own_website(url: str) -> bool:
     return not any(domain == agg or domain.endswith("." + agg) for agg in AGGREGATORS)
 
 
-def filter_restaurants(items: list[Restaurant], limit: int | None = None) -> list[Restaurant]:
-    """Drop duplicates and venues without a usable website (TODO 1.2.3)."""
+def filter_restaurants(
+    items: list[Restaurant],
+    limit: int | None = None,
+    require_website: bool = False,
+) -> list[Restaurant]:
+    """Drop duplicates but keep venues without a website.
+
+    Venues without a site are exactly the ones whose address can only be found
+    on Facebook, so discarding them was hiding half of the city.
+    """
     cleaned: list[Restaurant] = []
+    seen: set = set()
     seen_domains: set[str] = set()
-    seen_titles: set[str] = set()
 
     for item in items:
-        website = normalize_url(item.website)
-        if not website or not is_own_website(website):
-            continue
-        domain = registrable_domain(website)
         title_key = " ".join((item.title or "").lower().split())
-        if not title_key or domain in seen_domains or title_key in seen_titles:
+        if not title_key:
             continue
-        seen_domains.add(domain)
-        seen_titles.add(title_key)
 
+        website = normalize_url(item.website)
+        if website and not is_own_website(website):
+            # Facebook/booking page listed as "website": keep it as a Facebook URL.
+            facebook = clean_facebook_url(website)
+            if facebook and not item.facebook_url:
+                item.facebook_url = facebook
+            website = ""
+        if require_website and not website:
+            continue
+
+        domain = registrable_domain(website) if website else ""
+        key = (item.place_id or "").strip() or (
+            title_key,
+            clean_whitespace(item.address).lower(),
+        )
+        if key in seen:
+            continue
+        if domain and domain in seen_domains:
+            continue
+        seen.add(key)
+        if domain:
+            seen_domains.add(domain)
+
+        item.title = clean_whitespace(item.title)
         item.website = website
         item.google_maps_url = normalize_url(item.google_maps_url) or item.google_maps_url
         cleaned.append(item)
@@ -116,6 +186,15 @@ def _empty_result(restaurant: Restaurant) -> ContactResult:
         phone=restaurant.phone,
         address=restaurant.address,
         google_maps_url=restaurant.google_maps_url,
+        facebook_url=restaurant.facebook_url,
+        category=restaurant.category,
+        rating=restaurant.rating,
+        reviews=restaurant.reviews,
+        price=restaurant.price,
+        latitude=restaurant.latitude,
+        longitude=restaurant.longitude,
+        place_id=restaurant.place_id,
+        source_query=restaurant.source_query,
     )
 
 
@@ -125,38 +204,44 @@ def enrich_restaurants(
     *,
     query: str = "",
     use_search: bool = True,
-    search_limit: int = 30,
+    search_limit: int = 0,
     js_fallback: bool = False,
-    facebook_browser: bool = False,
+    facebook_browser: bool = True,
+    facebook_limit: int = 60,
     guess: bool = False,
     workers: int | None = None,
 ) -> tuple[list[ContactResult], RunStats]:
     stats = RunStats(filtered=len(restaurants))
+    stats.without_site = sum(1 for restaurant in restaurants if not restaurant.website)
     started = time.time()
-    results: dict[str, ContactResult] = {}
-    site_results: dict[str, WebsiteResult] = {}
+    results: list[ContactResult] = [_empty_result(r) for r in restaurants]
     workers = max(1, workers or settings.http_workers)
 
+    # ---- websites --------------------------------------------------------
     with HttpClient(timeout=settings.http_timeout) as http:
         crawler = WebsiteCrawler(http)
+        targets = {
+            index: restaurant
+            for index, restaurant in enumerate(restaurants)
+            if restaurant.website
+        }
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(crawler.analyze, restaurant.website): restaurant
-                for restaurant in restaurants
+                pool.submit(crawler.analyze, restaurant.website): index
+                for index, restaurant in targets.items()
             }
             for done, future in enumerate(as_completed(futures), start=1):
-                restaurant = futures[future]
-                row = _empty_result(restaurant)
+                index = futures[future]
+                restaurant = restaurants[index]
+                row = results[index]
                 try:
                     site = future.result()
                 except Exception as exc:  # noqa: BLE001 - one bad site must not stop the run
                     stats.errors += 1
                     row.note = f"site error: {exc}"[:200]
                     log.debug("crawl failed %s: %s", restaurant.website, exc)
-                    results[restaurant.website] = row
                     continue
 
-                site_results[restaurant.website] = site
                 if site.emails:
                     row.emails = site.emails
                     row.status = STATUS_SITE
@@ -172,37 +257,66 @@ def enrich_restaurants(
                 log.info(
                     "[%d/%d] %-45s %s",
                     done,
-                    len(restaurants),
+                    len(targets),
                     restaurant.title[:45],
                     row.primary_email or "-",
                 )
-                results[restaurant.website] = row
 
-    # ---- Search fallback (2.2): Facebook snippets, then the open web -----
-    pending = [r for r in restaurants if not results[r.website].emails]
+        for index, restaurant in enumerate(restaurants):
+            if not restaurant.website:
+                results[index].note = results[index].note or "нет сайта в Google Maps"
+
+    # ---- search: Facebook snippets + open web ----------------------------
+    pending = [index for index, row in enumerate(results) if not row.emails]
     if use_search and pending:
         city = city_from_query(query)
         with HttpClient(timeout=settings.http_timeout) as search_http:
-            finder = SocialEmailFinder(build_web_search(settings, search_http))
+            engine = build_web_search(settings, search_http)
+            finder = SocialEmailFinder(engine)
             if not finder.enabled:
                 log.info("No search backend available - Facebook/web lookup skipped")
             else:
-                budget = max(0, search_limit)
-                log.info(
-                    "Search fallback for %d venues without e-mail (query budget %d)",
-                    len(pending),
-                    budget,
-                )
-                for restaurant in pending:
-                    if budget <= 0 or not finder.enabled:
+                auto_budget = max(2, 2 * len(pending))
+                budget = search_limit if search_limit > 0 else min(auto_budget, settings.search_max_queries)
+                plans: list[tuple[int, list[tuple[str, str]]]] = []
+                used = 0
+                for index in pending:
+                    if used >= budget:
                         break
-                    row = results[restaurant.website]
-                    found = finder.find(
-                        restaurant.title, city, row.facebook_url, max_queries=min(3, budget)
+                    remaining = min(3, budget - used)
+                    plan = finder.plan(
+                        restaurants[index].title,
+                        city,
+                        restaurants[index].phone,
+                        results[index].facebook_url,
+                        max_queries=remaining,
                     )
-                    budget -= len(found.queries)
+                    if not plan:
+                        continue
+                    plans.append((index, plan))
+                    used += len(plan)
+
+                all_queries = unique(
+                    query_text for _index, plan in plans for _kind, query_text in plan
+                )
+                log.info(
+                    "Search fallback: %d quer(ies) for %d venue(s) without e-mail",
+                    len(all_queries),
+                    len(plans),
+                )
+                hits_by_query = engine.search_many(all_queries, num=10)
+                for index, plan in plans:
+                    row = results[index]
+                    found = finder.evaluate(
+                        restaurants[index].title,
+                        plan,
+                        hits_by_query,
+                        backend="google",
+                        facebook_url=row.facebook_url,
+                    )
                     if found.facebook_url and not row.facebook_url:
                         row.facebook_url = found.facebook_url
+                        restaurants[index].facebook_url = found.facebook_url
                     if found.emails:
                         row.emails = found.emails
                         if found.source == "facebook":
@@ -216,68 +330,74 @@ def enrich_restaurants(
                         log.info(
                             "  %s hit: %s -> %s",
                             found.source,
-                            restaurant.title[:40],
+                            restaurants[index].title[:40],
                             row.primary_email,
                         )
-                    elif found.error:
-                        log.debug("search miss %s: %s", restaurant.title, found.error)
-                if budget <= 0:
-                    log.info("Search query budget exhausted, remaining venues stay without e-mail")
-    # ---- JS render fallback (2.3) ----------------------------------------
-    js_queue = [
-        r for r in restaurants
-        if not results[r.website].emails and js_fallback
-    ]
-    if js_queue:
+
+    # ---- browser stage: JS sites + Facebook pages ------------------------
+    if js_fallback or facebook_browser:
         from .playwright_site import PlaywrightSiteRenderer
 
-        log.info("JS fallback for %d venues", len(js_queue))
         try:
             with PlaywrightSiteRenderer(headless=settings.headless) as renderer:
-                for restaurant in js_queue:
-                    row = results[restaurant.website]
-                    rendered = renderer.analyze(restaurant.website)
-                    if rendered.emails:
-                        row.emails = rendered.emails
-                        row.status = STATUS_JS
-                        row.sources = ["website (js render)"]
-                        stats.from_js += 1
-                    if rendered.facebook_url and not row.facebook_url:
-                        row.facebook_url = clean_facebook_url(rendered.facebook_url)
-                    if rendered.blocked and not row.emails:
-                        row.note = "website blocks bots"
-        except Exception as exc:  # noqa: BLE001 - playwright missing / browser crash
-            log.warning("JS fallback unavailable: %s", exc)
-
-    # ---- Facebook page render (2.2.3, optional) --------------------------
-    if facebook_browser:
-        fb_queue = [
-            r for r in restaurants
-            if not results[r.website].emails and results[r.website].facebook_url
-        ]
-        if fb_queue:
-            from .playwright_site import PlaywrightSiteRenderer
-
-            log.info("Facebook page render for %d venues", len(fb_queue))
-            try:
-                with PlaywrightSiteRenderer(headless=settings.headless) as renderer:
-                    for restaurant in fb_queue:
-                        row = results[restaurant.website]
-                        rendered = renderer.analyze(row.facebook_url, follow_contact=False)
+                if js_fallback:
+                    js_queue = [
+                        index
+                        for index, row in enumerate(results)
+                        if not row.emails and restaurants[index].website
+                    ]
+                    if js_queue:
+                        log.info("JS render for %d venue(s)", len(js_queue))
+                    for index in js_queue:
+                        row = results[index]
+                        rendered = renderer.analyze(restaurants[index].website)
                         if rendered.emails:
                             row.emails = rendered.emails
+                            row.status = STATUS_JS
+                            row.sources = ["website (js render)"]
+                            stats.from_js += 1
+                        if rendered.facebook_url and not row.facebook_url:
+                            row.facebook_url = clean_facebook_url(rendered.facebook_url)
+                        if rendered.blocked and not row.emails:
+                            row.note = "website blocks bots"
+
+                if facebook_browser:
+                    fb_queue = [
+                        index
+                        for index, row in enumerate(results)
+                        if not row.emails and row.facebook_url
+                    ][: max(0, facebook_limit)]
+                    if fb_queue:
+                        log.info(
+                            "Facebook page render for %d venue(s) (this is slow)",
+                            len(fb_queue),
+                        )
+                    for index in fb_queue:
+                        row = results[index]
+                        rendered = renderer.analyze(
+                            row.facebook_url, follow_contact=False
+                        )
+                        emails = filter_email_list(rendered.emails)
+                        if emails:
+                            row.emails = emails
                             row.status = STATUS_FB
                             row.sources = ["facebook (page render)"]
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Facebook browser fallback unavailable: %s", exc)
+                            stats.from_facebook += 1
+                            log.info(
+                                "  FB page hit: %s -> %s",
+                                restaurants[index].title[:40],
+                                row.primary_email,
+                            )
+        except Exception as exc:  # noqa: BLE001 - playwright missing / browser crash
+            log.warning("Browser fallback unavailable: %s", exc)
 
     # ---- MX-validated pattern guessing (optional) ------------------------
     if guess:
         guesser = EmailGuesser()
         guessed = 0
-        for restaurant in restaurants:
-            row = results[restaurant.website]
-            if row.emails:
+        for index, restaurant in enumerate(restaurants):
+            row = results[index]
+            if row.emails or not restaurant.website:
                 continue
             attempt = guesser.guess(restaurant.website)
             if not attempt.emails:
@@ -292,8 +412,7 @@ def enrich_restaurants(
         if guessed:
             log.info("Guessed %d unverified address(es) from MX records", guessed)
 
-    ordered = [results[r.website] for r in restaurants]
-    for row in ordered:
+    for row in results:
         row.emails = unique(row.emails)
         if not row.emails:
             row.status = STATUS_NOT_FOUND
@@ -303,7 +422,7 @@ def enrich_restaurants(
         stats.with_email += 1 if row.emails else 0
 
     stats.duration = time.time() - started
-    return ordered, stats
+    return results, stats
 
 
 # ------------------------------------------------------------------- driver
@@ -318,10 +437,14 @@ def run(
     out_dir: Path | None = None,
     workers: int | None = None,
     use_search: bool = True,
-    search_limit: int = 30,
+    search_limit: int = 0,
     js_fallback: bool = False,
-    facebook_browser: bool = False,
+    facebook_browser: bool = True,
+    facebook_limit: int = 60,
     guess: bool = False,
+    categories: list[str] | None = None,
+    area: Area | None = None,
+    require_website: bool = False,
 ) -> tuple[list[ContactResult], RunStats]:
     data_dir = out_dir or settings.ensure_data_dir()
     data_dir = Path(data_dir)
@@ -329,18 +452,26 @@ def run(
     stats = RunStats()
 
     if stage in {"all", "maps"}:
-        if not query:
-            raise ValueError("--query is required for the maps stage")
-        raw = collect_restaurants(settings, query, limit, provider)
+        raw = collect_restaurants(
+            settings,
+            query,
+            limit,
+            provider,
+            categories=categories,
+            area=area,
+        )
         save_restaurants_json(data_dir / "restaurants_raw.json", raw)
         stats.raw = len(raw)
-        restaurants = filter_restaurants(raw, limit=limit)
+        restaurants = filter_restaurants(
+            raw, limit=limit, require_website=require_website
+        )
         save_restaurants_json(data_dir / "restaurants_list.json", restaurants)
         stats.filtered = len(restaurants)
         log.info(
-            "Filtered %d -> %d venues (no website / duplicates removed)",
+            "Filtered %d -> %d venues (%d without a website kept)",
             stats.raw,
             stats.filtered,
+            sum(1 for r in restaurants if not r.website),
         )
     else:
         source = input_path or (data_dir / "restaurants_list.json")
@@ -359,12 +490,23 @@ def run(
         search_limit=search_limit,
         js_fallback=js_fallback,
         facebook_browser=facebook_browser,
+        facebook_limit=facebook_limit,
         guess=guess,
         workers=workers,
     )
     enrich_stats.raw = stats.raw or stats.filtered
+
+    meta = {
+        "query": query,
+        "queries": build_search_queries(query, categories, area),
+        "area": area,
+        "provider": provider or settings.maps_provider,
+        "categories": categories or [],
+        "stats": enrich_stats.as_dict(),
+    }
     save_results_csv(data_dir / "final_contacts.csv", results)
     save_results_json(data_dir / "final_contacts.json", results)
+    save_results_xlsx(data_dir / "final_contacts.xlsx", results, meta)
     log.info(
         "Done in %.1fs: %d with e-mail (site %d, fb %d, search %d, js %d, guessed %d), "
         "%d not found, %d errors",
