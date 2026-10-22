@@ -1,0 +1,31 @@
+# Virtual env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets & local config
+.env
+.env.local
+
+# Generated data
+data/*
+!data/.gitkeep
+
+# Playwright
+playwright-report/
+test-results/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

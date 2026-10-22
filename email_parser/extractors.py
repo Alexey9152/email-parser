@@ -1,0 +1,290 @@
+"""E-mail / link extraction from raw HTML.
+
+Everything here is pure (no I/O) so it can be unit-tested cheaply.
+"""
+
+from __future__ import annotations
+
+import html as html_lib
+import json
+import re
+from dataclasses import dataclass
+from urllib.parse import unquote, urljoin, urlsplit
+
+from bs4 import BeautifulSoup
+
+from .utils import clean_whitespace, normalize_url, registrable_domain, unique
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+# Assets and third-party widgets that love to leak fake addresses.
+JUNK_EMAIL_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
+    ".css", ".js", ".json", ".woff", ".woff2", ".ttf",
+)
+JUNK_DOMAINS = (
+    "sentry.io", "sentry-next.wixpress.com", "wixpress.com", "wix.com",
+    "example.com", "example.org", "example.net", "domain.com",
+    "yourdomain.com", "email.com", "test.com", "site.com", "localhost",
+    "sentry.wixpress.com", "godaddy.com", "squarespace.com",
+)
+JUNK_LOCAL_PARTS = {
+    "yourname", "your-name", "your_name", "your.email", "your-email",
+    "name", "username", "user", "email", "e-mail", "test", "example",
+    "someone", "firstname", "lastname", "john.doe", "johndoe",
+}
+HEX_LOCAL_RE = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
+
+CONTACT_KEYWORDS = (
+    "contact", "contact-us", "contactus", "contacts", "about", "about-us",
+    "reach", "reach-us", "kontakt", "impressum", "support", "team",
+)
+SOCIAL_HOSTS = {
+    "facebook": ("facebook.com", "fb.com", "fb.me"),
+    "instagram": ("instagram.com",),
+    "twitter": ("twitter.com", "x.com"),
+}
+
+_OBFUSCATION = (
+    (re.compile(r"\s*[\[\(\{]\s*at\s*[\]\)\}]\s*", re.IGNORECASE), "@"),
+    (re.compile(r"\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*", re.IGNORECASE), "."),
+)
+_ESCAPED_AT = re.compile(r"\\u0040|%40", re.IGNORECASE)
+_ESCAPED_DOT = re.compile(r"\\u002e|%2e", re.IGNORECASE)
+
+
+@dataclass(slots=True)
+class Link:
+    url: str
+    text: str = ""
+
+
+def deobfuscate(text: str) -> str:
+    for pattern, replacement in _OBFUSCATION:
+        text = pattern.sub(replacement, text)
+    text = _ESCAPED_AT.sub("@", text)
+    text = _ESCAPED_DOT.sub(".", text)
+    return text
+
+
+def normalize_email(raw: str) -> str:
+    """Clean one candidate address; returns '' if it looks like noise."""
+    value = html_lib.unescape(raw or "")
+    value = value.strip().strip(".,;:!?'\"<>()[]{}")
+    if value.lower().startswith("mailto:"):
+        value = value[7:]
+    value = unquote(value)
+    if "?" in value:
+        value = value.split("?", 1)[0]
+    if "#" in value:
+        value = value.split("#", 1)[0]
+    value = value.strip().strip(".,;:!?'\"<>()[]{}").lower()
+    value = value.replace(" ", "")
+    if not value or "%" in value:
+        return ""
+    if not EMAIL_RE.fullmatch(value):
+        return ""
+    if len(value) > 254:
+        return ""
+
+    local, _, domain = value.rpartition("@")
+    if not local or not domain or "." not in domain:
+        return ""
+    if len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in value:
+        return ""
+    if domain.endswith(JUNK_EMAIL_SUFFIXES):
+        return ""
+    if any(domain == d or domain.endswith("." + d) for d in JUNK_DOMAINS):
+        return ""
+    if local in JUNK_LOCAL_PARTS:
+        return ""
+    if HEX_LOCAL_RE.match(local):
+        return ""
+    # Domains made only of digits (e.g. 123456@2x.png leftovers) are never real.
+    if re.fullmatch(r"[\d.]+", domain):
+        return ""
+    return value
+
+
+def extract_emails(*texts: str) -> list[str]:
+    """Grab every plausible address from an arbitrary blob of text."""
+    found: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        for match in EMAIL_RE.findall(deobfuscate(text)):
+            email = normalize_email(match)
+            if email:
+                found.append(email)
+    return unique(found)
+
+
+def soup_from_html(html: str) -> BeautifulSoup:
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:  # pragma: no cover - lxml missing/broken
+        return BeautifulSoup(html, "html.parser")
+
+
+def visible_text(soup: BeautifulSoup) -> str:
+    for tag in soup(["script", "style", "noscript", "template"]):
+        tag.decompose()
+    return clean_whitespace(soup.get_text(" "))
+
+
+def collect_links(soup: BeautifulSoup, base_url: str) -> list[Link]:
+    links: list[Link] = []
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if not href or href.lower().startswith(("javascript:", "tel:", "sms:")):
+            continue
+        absolute = urljoin(base_url, href)
+        if not absolute.lower().startswith(("http://", "https://")):
+            continue
+        links.append(Link(url=absolute, text=clean_whitespace(anchor.get_text(" "))))
+    return links
+
+
+def mailto_addresses(soup: BeautifulSoup) -> list[str]:
+    emails: list[str] = []
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if href.lower().startswith("mailto:"):
+            emails.extend(extract_emails(href, anchor.get_text(" ")))
+    # data-* attributes are a common obfuscation trick
+    for tag in soup.find_all(attrs={"data-email": True}):
+        emails.extend(extract_emails(tag.get("data-email")))
+    return unique(emails)
+
+
+def _json_emails(node, depth: int = 0) -> list[str]:
+    """Walk JSON-LD looking for ``"email": "..."`` (very common on restaurant sites)."""
+    if depth > 8:
+        return []
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if str(key).lower() in {"email", "e-mail", "mail"}:
+                if isinstance(value, str):
+                    found.extend(extract_emails(value))
+                elif isinstance(value, list):
+                    found.extend(extract_emails(*[str(v) for v in value]))
+            else:
+                found.extend(_json_emails(value, depth + 1))
+    elif isinstance(node, list):
+        for item in node[:50]:
+            found.extend(_json_emails(item, depth + 1))
+    return found
+
+
+def structured_emails(soup: BeautifulSoup) -> list[str]:
+    """E-mails advertised in JSON-LD, microdata or og:email meta tags."""
+    found: list[str] = []
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        if not raw.strip():
+            continue
+        try:
+            found.extend(_json_emails(json.loads(raw)))
+        except (ValueError, TypeError):
+            found.extend(extract_emails(raw))
+
+    for meta in soup.find_all("meta"):
+        key = (meta.get("property") or meta.get("name") or "").lower()
+        if key in {"og:email", "email", "contact:email"} and meta.get("content"):
+            found.extend(extract_emails(meta["content"]))
+
+    for tag in soup.select('[itemprop="email"]'):
+        found.extend(extract_emails(tag.get("content") or tag.get_text(" ")))
+    return unique(found)
+
+
+def script_emails(soup: BeautifulSoup, limit: int = 300_000) -> list[str]:
+    """Inline JS often holds addresses that never reach the rendered markup."""
+    chunks: list[str] = []
+    total = 0
+    for script in soup.find_all("script"):
+        raw = script.string or script.get_text() or ""
+        if not raw:
+            continue
+        chunks.append(raw[: max(0, limit - total)])
+        total += len(raw)
+        if total >= limit:
+            break
+    return extract_emails(*chunks)
+
+
+def emails_from_page(html: str) -> tuple[list[str], BeautifulSoup]:
+    """mailto + JSON-LD + inline scripts + visible text, junk filtered."""
+    soup = soup_from_html(html)
+    emails = (
+        mailto_addresses(soup)
+        + structured_emails(soup)
+        + script_emails(soup)
+        + extract_emails(visible_text(soup))
+    )
+    return unique(emails), soup
+
+
+def contact_links(links: list[Link], base_url: str, limit: int = 3) -> list[Link]:
+    base_domain = registrable_domain(base_url)
+    scored: list[tuple[int, Link]] = []
+    for link in links:
+        if registrable_domain(link.url) != base_domain:
+            continue
+        path = urlsplit(link.url).path.lower().strip("/")
+        text = link.text.lower()
+        if not path and not text:
+            continue
+        score = 0
+        for keyword in CONTACT_KEYWORDS:
+            if keyword in path:
+                score = max(score, 3)
+            elif keyword in text:
+                score = max(score, 1)
+        if score and link.url.rstrip("/") != base_url.rstrip("/"):
+            scored.append((score, link))
+    scored.sort(key=lambda item: -item[0])
+    return unique([link for _, link in scored])[:limit]
+
+
+def _is_social_page(host: str, path: str) -> bool:
+    blocked = (
+        "/sharer", "/dialog", "/plugins", "/login", "/help", "/policies",
+        "/legal", "/tr?", "/watch", "/recover", "/privacy", "/terms",
+        "/share", "/hashtag", "/events/", "/groups/", "/photo",
+    )
+    if any(part in path for part in blocked):
+        return False
+    return len(path.strip("/")) > 0
+
+
+def social_links(links: list[Link]) -> dict[str, str]:
+    """First plausible Facebook / Instagram / Twitter profile URL."""
+    found: dict[str, str] = {}
+    for link in links:
+        parts = urlsplit(link.url)
+        host = parts.netloc.lower().removeprefix("www.")
+        path = parts.path.lower()
+        for network, hosts in SOCIAL_HOSTS.items():
+            if network in found:
+                continue
+            if any(host == h or host.endswith("." + h) for h in hosts):
+                if _is_social_page(host, path):
+                    found[network] = f"https://{parts.netloc}{parts.path}"
+    return found
+
+
+def clean_facebook_url(url: str) -> str:
+    """Accept fb.com / m.facebook.com and return a canonical profile URL."""
+    candidate = normalize_url(url)
+    if not candidate:
+        return ""
+    parts = urlsplit(candidate)
+    host = parts.netloc.lower()
+    if not any(host == h or host.endswith("." + h) for h in SOCIAL_HOSTS["facebook"]):
+        return ""
+    path = parts.path.rstrip("/")
+    if not path or not _is_social_page(host, path):
+        return ""
+    return f"https://www.facebook.com{path}"
