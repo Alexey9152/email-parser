@@ -316,6 +316,16 @@ class PlaywrightSiteRenderer:
     @staticmethod
     def _is_blocked(page) -> bool:
         try:
+            # mbasic/legacy Facebook links redirect to the login page; the body
+            # does not always contain one of the markers below.
+            current_url = (page.url or "").lower()
+            if "facebook.com/login" in current_url or (
+                "facebook." in current_url and "login.php" in current_url
+            ):
+                return True
+        except Exception:
+            pass
+        try:
             text = (page.content() or "")[:20_000].lower()
         except Exception:
             text = ""
