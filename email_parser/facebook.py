@@ -153,6 +153,7 @@ class SocialEmailFinder:
             return []
         canonical = clean_facebook_url(facebook_url)
         location = f' "{clean_whitespace(city)}"' if city else ""
+        city_text = clean_whitespace(city)
         options: list[tuple[str, str]] = []
         if facebook_url:
             # The page is already known: ask the engine to show its contact block.
@@ -161,18 +162,19 @@ class SocialEmailFinder:
             )
         options.extend(
             [
-                # Free engines (DDGS) often ignore the ``site:`` operator, but a
-                # normal phrase query still surfaces the Facebook page and its
-                # contact snippet.  Keep the more precise site: query as a later
-                # option for paid Google backends.
+                # A broad, unquoted query works much better on free engines than
+                # an exact phrase with the word "email": it still returns the
+                # Facebook profile, which the browser stage can open.  Keep the
+                # precise site: query later for paid Google backends.
+                ("facebook", f"{title} {city_text} facebook".strip()),
                 ("facebook", f'"{title}"{location} facebook email'),
                 ("web", f'"{title}"{location} email'),
                 ("facebook", f'site:facebook.com "{title}"{location} email'),
-                ("web", f'"{title}"{location} contact'),
             ]
         )
         if phone:
             options.append(("web", f'"{clean_whitespace(phone)}" email'))
+        options.append(("web", f'"{title}"{location} contact'))
         return options[:max_queries]
 
     # -- one-by-one (kept for the CLI / tests) -----------------------------

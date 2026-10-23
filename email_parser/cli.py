@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     # ``ddgs`` logs every individual engine request at INFO, which drowns out
     # our per-venue progress.  Keep its warnings and errors only.
     logging.getLogger("ddgs").setLevel(logging.WARNING)
+    logging.getLogger("primp").setLevel(logging.WARNING)
 
     if args.list_categories:
         _print_categories()

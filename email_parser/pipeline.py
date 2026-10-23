@@ -251,6 +251,29 @@ def _needs_better_email(row: ContactResult) -> bool:
     return not row.emails or not any(is_hiring_email(email) for email in row.emails)
 
 
+FACEBOOK_GUESS_SKIP = {
+    "www", "menu", "order", "orders", "restaurant", "restaurants", "location",
+    "locations", "eat", "food", "booking", "reservations", "hotel", "bar",
+    "cafe", "dining", "delivery", "shop",
+}
+
+
+def _facebook_domain_guess(website: str) -> str:
+    """Try ``facebook.com/<domain label>`` when the site itself is unreadable.
+
+    Many small venues use the same slug on their website and Facebook page
+    (``bigpeckersoc.com`` -> ``facebook.com/bigpeckersoc``).  The guessed page
+    is only accepted later if its rendered e-mail matches the venue; this
+    function merely produces a candidate URL.
+    """
+    domain = registrable_domain(website)
+    label = domain.split(".")[0].lower() if domain else ""
+    label = re.sub(r"[^a-z0-9]", "", label)
+    if len(label) < 4 or label in FACEBOOK_GUESS_SKIP:
+        return ""
+    return f"https://www.facebook.com/{label}"
+
+
 def _compact(value: str) -> str:
     """Keep only letters/digits so ``Longboard Cafe`` matches ``longboardcafe``."""
     return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
@@ -374,6 +397,7 @@ def enrich_restaurants(
         if osm_emails:
             _add_emails(results[index], osm_emails, SOURCE_OSM)
     workers = max(1, workers or settings.http_workers)
+    site_blocked: set[int] = set()
 
     # ---- websites --------------------------------------------------------
     with HttpClient(timeout=settings.http_timeout) as http:
@@ -407,11 +431,14 @@ def enrich_restaurants(
                     site = future.result()
                 except Exception as exc:  # noqa: BLE001 - one bad site must not stop the run
                     stats.errors += 1
+                    site_blocked.add(index)
                     row.note = f"site error: {exc}"[:200]
                     log.debug("crawl failed %s: %s", restaurant.website, exc)
                     _progress_update(progress, sites_done=done)
                     continue
 
+                if site.blocked or site.error:
+                    site_blocked.add(index)
                 if site.emails:
                     _add_emails(row, site.emails, SOURCE_SITE)
                 if site.facebook_url:
@@ -611,6 +638,7 @@ def enrich_restaurants(
                             restaurants[index].facebook_url = row.facebook_url
                         if rendered.blocked and not row.emails:
                             row.note = "website blocks bots"
+                            site_blocked.add(index)
                         _progress_update(
                             progress,
                             js_done=done,
@@ -618,10 +646,23 @@ def enrich_restaurants(
                         )
 
                 if facebook_browser:
+                    # When Cloudflare blocks the site, the footer Facebook icon
+                    # is unreachable.  Try the most likely profile slug from the
+                    # website domain; the page is accepted only if its e-mail
+                    # passes the same identity check below.
+                    guessed_pages: dict[int, str] = {}
+                    for index, row in enumerate(results):
+                        if row.facebook_url or row.emails or index not in site_blocked:
+                            continue
+                        candidate = _facebook_domain_guess(
+                            restaurants[index].website
+                        )
+                        if candidate:
+                            guessed_pages[index] = candidate
                     fb_candidates = [
                         index
                         for index, row in enumerate(results)
-                        if row.facebook_url
+                        if (row.facebook_url or index in guessed_pages)
                         and (
                             _needs_better_email(row)
                             # A snippet address is kept, but the page render is
@@ -630,9 +671,11 @@ def enrich_restaurants(
                             or not row.emails
                         )
                     ]
-                    # No address at all first, then generic info@ rows.
+                    # Known pages first; guessed ones only after them.  Within
+                    # each group, venues without any address go first.
                     fb_candidates.sort(
                         key=lambda index: (
+                            index in guessed_pages,
                             bool(results[index].emails),
                             len(results[index].emails),
                             index,
@@ -654,7 +697,9 @@ def enrich_restaurants(
                         )
                     for done, index in enumerate(fb_queue, start=1):
                         row = results[index]
-                        page_url = row.facebook_url
+                        page_url = row.facebook_url or guessed_pages.get(index, "")
+                        if not page_url:
+                            continue
                         try:
                             rendered = renderer.analyze(page_url, follow_contact=False)
                             # Facebook often shows a login interstitial on the first
@@ -679,6 +724,13 @@ def enrich_restaurants(
                                 emails = []
                             added = _add_emails(row, emails, SOURCE_FB_PAGE)
                             if added:
+                                if not row.facebook_url:
+                                    row.facebook_url = page_url
+                                    restaurants[index].facebook_url = page_url
+                                    log.info(
+                                        "  FB page guessed from website domain: %s",
+                                        page_url,
+                                    )
                                 log.info(
                                     "  FB page hit: %s -> %s",
                                     restaurants[index].title[:40],

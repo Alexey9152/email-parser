@@ -12,6 +12,7 @@ from email_parser.models import (
 )
 from email_parser.pipeline import (
     _add_emails,
+    _facebook_domain_guess,
     _facebook_page_matches,
     _needs_better_email,
     build_search_queries,
@@ -73,6 +74,19 @@ def test_limit_and_helpers():
     assert registrable_domain("https://menu.joes.co.uk/x") == "joes.co.uk"
     assert city_from_query("restaurants in Ocean City, MD") == "Ocean City, MD"
     assert city_from_query("Ocean City, MD") == "Ocean City, MD"
+
+
+def test_facebook_domain_guess_uses_venue_domain_label():
+    assert (
+        _facebook_domain_guess("https://www.bigpeckersoc.com/")
+        == "https://www.facebook.com/bigpeckersoc"
+    )
+    assert (
+        _facebook_domain_guess("https://menu.example.com/")
+        == "https://www.facebook.com/example"
+    )
+    assert _facebook_domain_guess("") == ""
+    assert _facebook_domain_guess("https://www.menu.com/") == ""
 
 
 def test_facebook_email_matches_website_domain():
