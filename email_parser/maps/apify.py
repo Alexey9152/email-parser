@@ -18,6 +18,7 @@ from ..categories import per_query_limit
 from ..models import Restaurant
 from ..utils import Area, clean_whitespace
 from .base import MapsProviderBase, MapsProviderError
+from .social import facebook_from_payload
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +180,7 @@ class ApifyProvider(MapsProviderBase):
             phone=str(phone).strip(),
             website=website,
             google_maps_url=maps_url,
+            facebook_url=facebook_from_payload(item),
             category=category,
             source_query=query,
             rating=_as_float(

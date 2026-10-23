@@ -28,6 +28,7 @@ from .utils import Area, ensure_parent, unique
 CSV_COLUMNS = (
     ("Name", "title"),
     ("Category", "category"),
+    ("Chain", "chain"),
     ("Rating", "rating"),
     ("Reviews", "reviews"),
     ("Price", "price"),
@@ -65,6 +66,7 @@ STATUS_LABELS = {
     "Found via JS render": "Найден после рендера",
     "Found on OpenStreetMap": "Найден в OpenStreetMap",
     "Guessed (unverified)": "Предположение (не проверено)",
+    "Chain — apply on website": "Сеть — заявка на сайте",
     "Not found": "Не найден",
 }
 
@@ -75,6 +77,7 @@ STATUS_FILLS = {
     "Found via JS render": "E2EFDA",
     "Found on OpenStreetMap": "D9E1F2",
     "Guessed (unverified)": "FFEB9C",
+    "Chain — apply on website": "D9D9D9",
     "Not found": "FFC7CE",
 }
 
@@ -146,6 +149,7 @@ XLSX_HEADERS = (
     ("Запрос", 30),
     ("Откуда основной e-mail", 26),
     ("Источники e-mail", 48),
+    ("Сеть", 22),
 )
 
 
@@ -211,6 +215,7 @@ def save_results_xlsx(
                 f"{email} ← {SOURCE_LABELS.get(source, source)}"
                 for email, source in row.email_sources.items()
             ),
+            row.chain,
         ]
         for column, value in enumerate(values, start=1):
             cell = sheet.cell(row=row_index, column=column, value=value)
@@ -236,12 +241,66 @@ def save_results_xlsx(
 
     last_row = max(2, len(results) + 1)
     sheet.freeze_panes = "B2"
-    sheet.auto_filter.ref = f"A1:U{last_row}"
+    sheet.auto_filter.ref = f"A1:V{last_row}"
 
+    _write_chains(workbook, results)
     _write_summary(workbook, results, meta)
     workbook.save(path)
     workbook.close()
     return path
+
+
+def _write_chains(workbook, results: list[ContactResult]) -> None:
+    """Separate sheet for chain venues; they apply through their brand site."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    chains = [row for row in results if row.chain]
+    if not chains:
+        return
+    sheet = workbook.create_sheet("Сети")
+    headers = (
+        ("Название", 32),
+        ("Сеть", 22),
+        ("Сайт", 38),
+        ("Facebook", 34),
+        ("Телефон", 16),
+        ("Адрес", 42),
+        ("Статус", 26),
+        ("Google Maps", 24),
+        ("Примечание", 40),
+    )
+    header_fill = PatternFill("solid", fgColor="595959")
+    header_font = Font(color="FFFFFF", bold=True)
+    link_font = Font(color="0563C1", underline="single")
+    for index, (name, width) in enumerate(headers, start=1):
+        cell = sheet.cell(row=1, column=index, value=name)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row_index, row in enumerate(chains, start=2):
+        values = (
+            row.title,
+            row.chain,
+            row.website,
+            row.facebook_url,
+            row.phone,
+            row.address,
+            STATUS_LABELS.get(row.status, row.status),
+            row.google_maps_url,
+            row.note,
+        )
+        for column, value in enumerate(values, start=1):
+            cell = sheet.cell(row=row_index, column=column, value=value)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for column, url in ((3, row.website), (4, row.facebook_url), (8, row.google_maps_url)):
+            cell = sheet.cell(row=row_index, column=column)
+            if url:
+                cell.hyperlink = url
+                cell.font = link_font
+    sheet.freeze_panes = "B2"
+    sheet.auto_filter.ref = f"A1:I{max(2, len(chains) + 1)}"
 
 
 def _write_summary(workbook, results: list[ContactResult], meta: dict[str, Any]) -> None:
@@ -290,6 +349,7 @@ def _write_summary(workbook, results: list[ContactResult], meta: dict[str, Any])
                 ("Найдено в поиске", stats.get("from_search", 0)),
                 ("Найдено рендером", stats.get("from_js", 0)),
                 ("Предположений", stats.get("from_guess", 0)),
+                ("Сетевых заведений", stats.get("chains", 0)),
                 ("Ошибок", stats.get("errors", 0)),
                 ("Длительность, сек", round(float(stats.get("duration") or 0), 1)),
             ]
@@ -476,6 +536,7 @@ def load_results_xlsx(path: str | Path) -> list[ContactResult]:
                 ).strip(),
                 note=str(cell(values, "Примечание", "Note") or "").strip(),
                 category=str(cell(values, "Категория", "Category") or "").strip(),
+                chain=str(cell(values, "Сеть", "Chain") or "").strip(),
                 rating=_as_float(cell(values, "Рейтинг", "Rating")),
                 reviews=_as_int(cell(values, "Отзывов", "Reviews")),
                 price=str(cell(values, "Цена", "Price") or "").strip(),

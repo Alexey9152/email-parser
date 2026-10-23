@@ -15,6 +15,7 @@ STATUS_SEARCH = "Found via web search"
 STATUS_JS = "Found via JS render"
 STATUS_OSM = "Found on OpenStreetMap"
 STATUS_GUESS = "Guessed (unverified)"
+STATUS_CHAIN = "Chain — apply on website"
 STATUS_NOT_FOUND = "Not found"
 
 # Machine-readable origin of a single e-mail address.  They are stored per
@@ -119,8 +120,10 @@ FREE_MAIL_DOMAINS = frozenset(
     {
         "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
         "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
-        "mail.com", "gmx.com", "gmx.net", "proton.me", "protonmail.com",
-        "mail.ru", "yandex.ru", "yandex.com", "bk.ru", "list.ru",
+        "mac.com", "mail.com", "gmx.com", "gmx.net", "zoho.com", "proton.me",
+        "protonmail.com", "mail.ru", "yandex.ru", "yandex.com", "bk.ru",
+        "list.ru", "comcast.net", "verizon.net", "att.net", "sbcglobal.net",
+        "cox.net", "charter.net",
     }
 )
 
@@ -252,6 +255,7 @@ class Restaurant:
     latitude: float | None = None
     longitude: float | None = None
     place_id: str = ""
+    chain: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -284,6 +288,8 @@ class ContactResult:
     longitude: float | None = None
     place_id: str = ""
     source_query: str = ""
+    # Canonical chain name (Dunkin', Subway, ...); empty for independent venues.
+    chain: str = ""
     # email -> SOURCE_* constant; populated as soon as an address is found.
     email_sources: dict[str, str] = field(default_factory=dict)
     # Set when an existing report is loaded again; keeps the address the user

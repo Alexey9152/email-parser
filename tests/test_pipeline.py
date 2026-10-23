@@ -132,6 +132,15 @@ def test_facebook_title_match_on_corporate_domain_is_not_enough():
     )
 
 
+def test_city_facebook_page_email_is_rejected_in_browser_stage():
+    assert not _facebook_page_matches(
+        "https://www.facebook.com/OceanCityMD",
+        ["menuocity@gmail.com"],
+        title="Ocean City Fish Company",
+        city="Ocean City, MD",
+    )
+
+
 def test_facebook_consumer_mailbox_matches_venue_title():
     # Regression: facebook.com/DoughRollerRestaurants has no website and lists
     # doughrollerocmd@gmail.com; the old slug-only check rejected it.

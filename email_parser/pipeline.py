@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .categories import build_queries
+from .chains import detect_chain, filter_chain_emails
 from .config import Settings
 from .exporter import (
     load_restaurants,
@@ -21,7 +22,12 @@ from .exporter import (
     save_results_xlsx,
 )
 from .extractors import clean_facebook_url, extract_emails
-from .facebook import SocialEmailFinder, filter_email_list
+from .facebook import (
+    SocialEmailFinder,
+    facebook_email_belongs_to_venue,
+    facebook_page_relevant,
+    filter_email_list,
+)
 from .guess import EmailGuesser
 from .http_client import HttpClient
 from .maps import build_provider
@@ -34,6 +40,7 @@ from .models import (
     SOURCE_SITE,
     SOURCE_SITE_JS,
     SOURCE_STATUS,
+    STATUS_CHAIN,
     STATUS_NOT_FOUND,
     STATUS_SITE,
     ContactResult,
@@ -75,6 +82,7 @@ class RunStats:
     from_js: int = 0
     from_osm: int = 0
     from_guess: int = 0
+    chains: int = 0
     not_found: int = 0
     errors: int = 0
     duration: float = 0.0
@@ -165,6 +173,13 @@ def filter_restaurants(
         if require_website and not website:
             continue
 
+        item.title = clean_whitespace(item.title)
+        item.website = website
+        item.facebook_url = clean_facebook_url(item.facebook_url)
+        item.google_maps_url = normalize_url(item.google_maps_url) or item.google_maps_url
+        if not item.chain:
+            item.chain = detect_chain(item.title, item.website)
+
         domain = registrable_domain(website) if website else ""
         key = (item.place_id or "").strip() or (
             title_key,
@@ -172,15 +187,15 @@ def filter_restaurants(
         )
         if key in seen:
             continue
-        if domain and domain in seen_domains:
+        # Independent venues often have several Maps cards pointing at the same
+        # site.  Chain locations legitimately share a corporate domain, so keep
+        # each location in the separate chain list.
+        if domain and domain in seen_domains and not item.chain:
             continue
         seen.add(key)
         if domain:
             seen_domains.add(domain)
 
-        item.title = clean_whitespace(item.title)
-        item.website = website
-        item.google_maps_url = normalize_url(item.google_maps_url) or item.google_maps_url
         cleaned.append(item)
         if limit and len(cleaned) >= limit:
             break
@@ -204,6 +219,7 @@ def _empty_result(restaurant: Restaurant) -> ContactResult:
         longitude=restaurant.longitude,
         place_id=restaurant.place_id,
         source_query=restaurant.source_query,
+        chain=restaurant.chain,
     )
 
 
@@ -274,91 +290,36 @@ def _facebook_domain_guess(website: str) -> str:
     return f"https://www.facebook.com/{label}"
 
 
-def _compact(value: str) -> str:
-    """Keep only letters/digits so ``Longboard Cafe`` matches ``longboardcafe``."""
-    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
-
-
-# Consumer/ISP mailboxes are usual for small venues.  A title match in the
-# local part is trustworthy there; on a corporate domain it is not enough
-# (e.g. facebook.com/TheBonfireSXM renders thebonfire@siriusxm.com, which is a
-# radio show, not the restaurant at that address).
-CONSUMER_EMAIL_DOMAINS = {
-    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
-    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
-    "mac.com", "proton.me", "protonmail.com", "mail.com", "gmx.com", "gmx.net",
-    "zoho.com", "yandex.com", "yandex.ru", "comcast.net", "verizon.net",
-    "att.net", "sbcglobal.net", "cox.net", "charter.net",
-}
-
-
 def _facebook_page_matches(
-    page_url: str, emails: list[str], *, website: str = "", title: str = ""
+    page_url: str,
+    emails: list[str],
+    *,
+    website: str = "",
+    title: str = "",
+    city: str = "",
 ) -> bool:
     """Check that the addresses belong to the venue behind *this* page.
 
     Facebook login interstitials and redirects sometimes render another page;
     the rendered e-mail must be tied to the page slug, the venue title, or the
-    venue website.  The website check is important for pages such as
-    ``facebook.com/longboardcafemd`` whose e-mail is
-    ``info@longboardcafe.net``: the city suffix is not part of the domain.
-
-    Numeric page ids carry no name hints, so they are accepted as before.
+    venue website.  City/tourism pages are rejected here too: a page called
+    ``OceanCityMD`` must not donate ``menuocity@gmail.com`` to a restaurant.
     """
     slug = urlsplit(page_url or "").path.strip("/").split("/")[0].lower()
     if not slug or slug.isdigit():
         return True
-    emails = [email.lower() for email in emails if "@" in email]
-
-    # The strongest signal: the address lives on the venue's own website.
-    site_domain = registrable_domain(website)
-    strong: set[str] = set()
-    weak: set[str] = set()
-    slug_compact = _compact(slug)
-    if len(slug_compact) >= 5:
-        strong.add(slug_compact)
-    elif len(slug_compact) >= 3:
-        weak.add(slug_compact)
-    # facebook.com/longboardcafemd -> longboardcafe
-    for suffix in (
-        "md", "va", "de", "nj", "pa", "dc", "ny", "nc", "sc", "ga", "fl",
-        "tx", "ca", "oc",
-    ):
-        if slug_compact.endswith(suffix):
-            stem = slug_compact[: -len(suffix)]
-            if len(stem) >= 5:
-                strong.add(stem)
-            elif len(stem) >= 4:
-                weak.add(stem)
-    title_compact = _compact(title)
-    if len(title_compact) >= 5:
-        strong.add(title_compact)
-    for token in re.split(r"[^a-z0-9]+", title.lower()):
-        if len(token) >= 5:
-            strong.add(token)
-        elif len(token) >= 4:
-            weak.add(token)
-    candidates = strong | weak
-
-    for email in emails:
-        local, _, domain = email.partition("@")
-        domain = domain.strip().strip(".")
-        if not domain:
-            continue
-        email_domain = registrable_domain("https://" + domain)
-        if site_domain and email_domain == site_domain:
-            return True
-        local_compact = _compact(local)
-        domain_compact = _compact(domain)
-        if domain in CONSUMER_EMAIL_DOMAINS and any(
-            candidate in local_compact for candidate in candidates
-        ):
-            return True
-        # A brand domain (info@longboardcafe.net) is a strong signal too, while
-        # a corporate domain that merely shares a generic word is not.
-        if any(candidate in domain_compact for candidate in strong):
-            return True
-    return False
+    page_relevant = facebook_page_relevant(page_url, "", title, city)
+    return any(
+        facebook_email_belongs_to_venue(
+            email,
+            title,
+            city,
+            website=website,
+            page_relevant=page_relevant,
+        )
+        for email in emails
+        if "@" in email
+    )
 
 
 def _default_source(row: ContactResult) -> str:
@@ -389,13 +350,21 @@ def enrich_restaurants(
     stats = RunStats(filtered=len(restaurants))
     stats.without_site = sum(1 for restaurant in restaurants if not restaurant.website)
     started = time.time()
+    for restaurant in restaurants:
+        if not restaurant.chain:
+            restaurant.chain = detect_chain(restaurant.title, restaurant.website)
+    stats.chains = sum(1 for restaurant in restaurants if restaurant.chain)
+    city = city_from_query(query)
     results: list[ContactResult] = [_empty_result(r) for r in restaurants]
     # OpenStreetMap tags often contain the venue's own contact address.  Use it
     # before crawling/searching so a missing website does not hide a valid inbox.
     for index, restaurant in enumerate(restaurants):
         osm_emails = extract_emails(restaurant.email)
         if osm_emails:
-            _add_emails(results[index], osm_emails, SOURCE_OSM)
+            if restaurant.chain:
+                osm_emails = filter_chain_emails(osm_emails, restaurant.chain)
+            if osm_emails:
+                _add_emails(results[index], osm_emails, SOURCE_OSM)
     workers = max(1, workers or settings.http_workers)
     site_blocked: set[int] = set()
 
@@ -440,7 +409,11 @@ def enrich_restaurants(
                 if site.blocked or site.error:
                     site_blocked.add(index)
                 if site.emails:
-                    _add_emails(row, site.emails, SOURCE_SITE)
+                    site_emails = site.emails
+                    if restaurant.chain:
+                        site_emails = filter_chain_emails(site_emails, restaurant.chain)
+                    if site_emails:
+                        _add_emails(row, site_emails, SOURCE_SITE)
                 if site.facebook_url:
                     row.facebook_url = clean_facebook_url(site.facebook_url)
                     restaurant.facebook_url = row.facebook_url
@@ -473,16 +446,20 @@ def enrich_restaurants(
     # ---- search: Facebook snippets + open web ----------------------------
     # Search not only venues without any address: an info@ on the website is
     # often a reservations inbox, while the manager's address is on Facebook.
-    pending = [index for index, row in enumerate(results) if not row.emails]
+    pending = [
+        index
+        for index, row in enumerate(results)
+        if not row.emails and not restaurants[index].chain
+    ]
     weak = [
         index
         for index, row in enumerate(results)
         if row.emails
+        and not restaurants[index].chain
         and _needs_better_email(row)
         and (not row.facebook_url or not facebook_browser)
     ]
     if use_search and (pending or weak):
-        city = city_from_query(query)
         with HttpClient(timeout=settings.http_timeout) as search_http:
             engine = build_web_search(settings, search_http)
             finder = SocialEmailFinder(engine)
@@ -562,6 +539,7 @@ def enrich_restaurants(
                         backend="search",
                         facebook_url=row.facebook_url,
                         restaurant_website=restaurants[index].website,
+                        city=city,
                     )
                     if found.facebook_url and not row.facebook_url:
                         row.facebook_url = found.facebook_url
@@ -594,7 +572,11 @@ def enrich_restaurants(
         from .playwright_site import PlaywrightSiteRenderer
 
         try:
-            with PlaywrightSiteRenderer(headless=settings.headless) as renderer:
+            with PlaywrightSiteRenderer(
+                headless=settings.headless,
+                profile_dir=settings.facebook_profile_dir,
+                storage_state=settings.facebook_storage_state,
+            ) as renderer:
                 if js_fallback:
                     js_queue = [
                         index
@@ -630,7 +612,13 @@ def enrich_restaurants(
                             )
                             continue
                         if rendered.emails:
-                            _add_emails(row, rendered.emails, SOURCE_SITE_JS)
+                            js_emails = rendered.emails
+                            if restaurants[index].chain:
+                                js_emails = filter_chain_emails(
+                                    js_emails, restaurants[index].chain
+                                )
+                            if js_emails:
+                                _add_emails(row, js_emails, SOURCE_SITE_JS)
                         if rendered.facebook_url and not row.facebook_url:
                             row.facebook_url = clean_facebook_url(
                                 rendered.facebook_url
@@ -652,7 +640,12 @@ def enrich_restaurants(
                     # passes the same identity check below.
                     guessed_pages: dict[int, str] = {}
                     for index, row in enumerate(results):
-                        if row.facebook_url or row.emails or index not in site_blocked:
+                        if (
+                            restaurants[index].chain
+                            or row.facebook_url
+                            or row.emails
+                            or index not in site_blocked
+                        ):
                             continue
                         candidate = _facebook_domain_guess(
                             restaurants[index].website
@@ -662,7 +655,8 @@ def enrich_restaurants(
                     fb_candidates = [
                         index
                         for index, row in enumerate(results)
-                        if (row.facebook_url or index in guessed_pages)
+                        if not restaurants[index].chain
+                        and (row.facebook_url or index in guessed_pages)
                         and (
                             _needs_better_email(row)
                             # A snippet address is kept, but the page render is
@@ -717,6 +711,7 @@ def enrich_restaurants(
                                 emails,
                                 website=restaurants[index].website,
                                 title=restaurants[index].title,
+                                city=city,
                             ):
                                 row.note = (
                                     "Facebook page e-mail ignored: page identity unverified"
@@ -760,7 +755,9 @@ def enrich_restaurants(
         guess_queue = [
             index
             for index, restaurant in enumerate(restaurants)
-            if not results[index].emails and restaurant.website
+            if not results[index].emails
+            and restaurant.website
+            and not restaurant.chain
         ]
         _progress_update(
             progress,
@@ -802,12 +799,23 @@ def enrich_restaurants(
             row.note = ""
 
     # ---- final ranking / statuses / stats --------------------------------
-    for row in results:
+    for row, restaurant in zip(results, restaurants):
+        row.chain = restaurant.chain
+        if row.chain:
+            kept = filter_chain_emails(row.emails, row.chain)
+            if len(kept) != len(row.emails):
+                for email in set(row.emails) - set(kept):
+                    row.email_sources.pop(email, None)
+                row.emails = kept
         row.emails = unique(row.emails)
         for email in row.emails:
             row.email_sources.setdefault(email, _default_source(row))
         if not row.emails:
-            row.status = STATUS_NOT_FOUND
+            if row.chain:
+                row.status = STATUS_CHAIN
+                row.note = row.note or "chain — apply on the venue's website"
+            else:
+                row.status = STATUS_NOT_FOUND
             continue
         source = row.primary_email_source
         row.status = SOURCE_STATUS.get(source, row.status or STATUS_SITE)
@@ -833,7 +841,10 @@ def enrich_restaurants(
     stats.from_guess = sum(
         1 for row in results if row.primary_email_source == SOURCE_GUESS
     )
-    stats.not_found = sum(1 for row in results if not row.primary_email)
+    stats.chains = sum(1 for row in results if row.chain)
+    stats.not_found = sum(
+        1 for row in results if not row.primary_email and not row.chain
+    )
     stats.duration = time.time() - started
 
     _progress_update(

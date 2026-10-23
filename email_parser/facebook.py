@@ -18,8 +18,9 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .extractors import clean_facebook_url, extract_emails
+from .models import FREE_MAIL_DOMAINS
 from .serp import SearchHit, WebSearch
-from .utils import clean_whitespace, unique
+from .utils import clean_whitespace, registrable_domain, unique
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,28 @@ USELESS_LOCAL_PARTS = {"noreply", "no-reply", "donotreply", "do-not-reply", "pos
 TITLE_STOPWORDS = {
     "the", "and", "for", "inc", "llc", "ltd", "co", "restaurant", "restaurants",
     "cafe", "bar", "grill", "kitchen", "pizzeria", "pizza", "of", "at",
+}
+
+# Words that describe the city/area rather than the venue.  A Facebook page
+# called "Ocean City MD" must not be accepted for "Ocean City Fish Company".
+PLACE_TOKENS = {
+    "ocean", "city", "beach", "boardwalk", "downtown", "uptown", "coast",
+    "coastal", "shore", "bay", "bayside", "beachside", "seaside", "lakeside",
+    "riverside", "oceanside", "harborside", "island", "harbor", "harbour",
+    "marina", "county", "town", "village", "east", "west", "north", "south",
+    "upper", "lower", "maryland", "delaware", "virginia", "pennsylvania", "new",
+    "jersey", "carolina", "florida", "georgia", "texas", "california",
+    "md", "de", "nj", "pa", "va", "dc", "ny", "nc", "sc", "ga", "fl", "tx",
+    "ca", "oc",
+}
+GENERIC_VENUE_TOKENS = {
+    "house", "company", "dining", "eatery", "bistro", "pub", "tavern",
+    "lounge", "market", "deli", "bakery", "coffee", "ice", "cream", "shop",
+    "food", "seafood", "steakhouse", "sports", "family", "american",
+}
+GENERIC_EMAIL_LOCALS = {
+    "info", "contact", "hello", "office", "team", "admin", "manager",
+    "hiring", "hr", "jobs", "careers", "mail", "email", "general",
 }
 
 
@@ -57,7 +80,7 @@ def filter_email_list(emails: list[str]) -> list[str]:
 AGGREGATE_PATH_HINTS = (
     "category", "/pages/category", "/directory", "/directories", "/cities",
     "/city/", "/places", "/businesses", "/biz", "/local", "/nearby", "/top-",
-    "/best-", "/listing", "/yellow",
+    "/best-", "/listing", "/yellow", "/groups/",
 )
 
 
@@ -106,6 +129,186 @@ def _is_aggregate(hit: SearchHit) -> bool:
     if any(hint in link for hint in AGGREGATE_PATH_HINTS):
         return True
     return any(hint in (hit.title or "").lower() for hint in AGGREGATE_PATH_HINTS)
+
+
+def _compact(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _title_variants(title: str) -> set[str]:
+    compact = _compact(title)
+    variants = {compact} if compact else set()
+    # Only strip a real leading article ("The Bonfire"), not the first three
+    # letters of a word such as "Theater".
+    if re.match(r"^the(?:[^a-z]|$)", (title or "").strip().lower()):
+        variants.add(compact[3:])
+    return {value for value in variants if len(value) >= 4}
+
+
+def _venue_tokens(title: str, city: str = "") -> tuple[list[str], list[str]]:
+    """Return (strong, weak) title tokens.
+
+    Strong tokens identify the venue itself.  City words and generic venue
+    nouns are weak: they cannot prove that a Facebook page belongs to a
+    particular restaurant.
+    """
+    city_tokens = set(re.findall(r"[a-z0-9']{3,}", (city or "").lower()))
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9']{3,}", (title or "").lower())
+        if token not in TITLE_STOPWORDS
+    ]
+    strong: list[str] = []
+    weak: list[str] = []
+    for token in tokens:
+        compact = _compact(token)
+        if len(compact) < 3:
+            continue
+        if token in city_tokens or token in PLACE_TOKENS:
+            weak.append(token)
+        elif token in GENERIC_VENUE_TOKENS:
+            weak.append(token)
+        else:
+            strong.append(token)
+    return strong, weak
+
+
+def _slug_relevant(slug: str, page_title: str, title: str, city: str = "") -> bool:
+    if (slug or "").isdigit():
+        return True
+    haystack = _compact(f"{slug} {page_title}")
+    variants = _title_variants(title)
+    if any(variant in haystack for variant in variants):
+        return True
+    strong, _weak = _venue_tokens(title, city)
+    if not strong:
+        return False
+    # Shortened page slugs often keep only the distinctive first word:
+    # ``facebook.com/Mackys`` for "Macky's Bayside Bar and Grill".
+    first = _compact(strong[0])
+    if len(first) >= 5 and first in haystack:
+        return True
+    matched = sum(1 for token in strong if _compact(token) in haystack)
+    return matched >= max(1, math.ceil(len(strong) * 0.6))
+
+
+def _facebook_slug(link: str) -> tuple[str, bool]:
+    """Return the page slug and whether the URL is an id-only profile.
+
+    ``clean_facebook_url`` reduces posts/sub-tabs and canonicalises legacy
+    ``/pg/Name`` links, so the identity check always looks at the real page.
+    """
+    cleaned = clean_facebook_url(link) or (link or "")
+    segments = [segment for segment in urlsplit(cleaned).path.split("/") if segment]
+    if not segments:
+        return "", False
+    slug = segments[0]
+    if slug.lower() == "profile.php" and "id=" in cleaned.lower():
+        return slug, True
+    if slug.lower() in {"pages", "people", "public"} and len(segments) >= 3:
+        return segments[1], False
+    return slug, False
+
+
+def _facebook_page_relevant(hit: SearchHit, title: str, city: str = "") -> bool:
+    """Reject city/category pages that merely contain the location name.
+
+    The search-result title is deliberately ignored: an engine can prepend the
+    venue name to a city page (``Ocean City Fish Company - Ocean City, MD |
+    Facebook``) even though the URL is ``facebook.com/OceanCityMD``.  Only the
+    URL identifies the page.
+    """
+    slug, id_only = _facebook_slug(hit.link or "")
+    if id_only:
+        return True
+    return _slug_relevant(slug, "", title, city)
+
+
+def facebook_page_relevant(
+    page_url: str, page_title: str, title: str, city: str = ""
+) -> bool:
+    """Public wrapper for the browser identity check."""
+    slug, id_only = _facebook_slug(page_url or "")
+    if id_only:
+        return True
+    return _slug_relevant(slug, page_title or "", title, city)
+
+
+def facebook_email_belongs_to_venue(
+    email: str,
+    title: str,
+    city: str = "",
+    *,
+    website: str = "",
+    page_relevant: bool = True,
+) -> bool:
+    """Public wrapper for the mailbox identity check."""
+    return _email_matches_venue(
+        email,
+        title,
+        city,
+        website=website,
+        page_relevant=page_relevant,
+    )
+
+
+def _email_matches_venue(
+    email: str,
+    title: str,
+    city: str,
+    *,
+    website: str = "",
+    page_relevant: bool = True,
+) -> bool:
+    """The snippet address must be tied to this venue, not to the city page."""
+    if "@" not in email:
+        return False
+    local, _, domain = email.lower().partition("@")
+    domain = domain.strip().strip(".")
+    if not local or not domain:
+        return False
+
+    site_domain = registrable_domain(website)
+    email_domain = registrable_domain("https://" + domain)
+    if site_domain and email_domain == site_domain:
+        return True
+    if not page_relevant:
+        return False
+
+    strong, _weak = _venue_tokens(title, city)
+    variants = _title_variants(title)
+    haystack = _compact(f"{local} {domain}")
+    domain_compact = _compact(domain)
+    local_compact = _compact(local)
+
+    if any(variant in haystack for variant in variants):
+        if domain in FREE_MAIL_DOMAINS:
+            return True
+        # On a corporate domain a title in the local part alone is not enough:
+        # thebonfire@siriusxm.com belongs to a radio show, not to the venue.
+        return any(variant in domain_compact for variant in variants)
+
+    if domain in FREE_MAIL_DOMAINS:
+        if local_compact in GENERIC_EMAIL_LOCALS:
+            return True
+        if any(_compact(token) in haystack for token in strong):
+            return True
+        # A city mailbox such as menuocity@gmail.com has no venue token, only
+        # the place name.  It may belong to the tourist office, not the venue.
+        if any(
+            len(_compact(token)) >= 3 and _compact(token) in local_compact
+            for token in PLACE_TOKENS
+        ):
+            return False
+        return True
+
+    return any(_compact(token) in domain_compact for token in strong)
+
+
+def _same_facebook_page(hit: SearchHit, page_url: str) -> bool:
+    hit_page = clean_facebook_url(hit.link)
+    known = clean_facebook_url(page_url)
+    return bool(hit_page and known and hit_page == known)
 
 
 @dataclass(slots=True)
@@ -203,7 +406,14 @@ class SocialEmailFinder:
             result.queries.append(query)
             if hits:
                 hits_by_query[query] = hits
-        evaluated = self.evaluate(title, plan, hits_by_query, backend, result.facebook_url)
+        evaluated = self.evaluate(
+            title,
+            plan,
+            hits_by_query,
+            backend,
+            result.facebook_url,
+            city=city,
+        )
         evaluated.queries = result.queries
         return evaluated
 
@@ -216,6 +426,7 @@ class SocialEmailFinder:
         backend: str = "google",
         facebook_url: str = "",
         restaurant_website: str = "",
+        city: str = "",
     ) -> SocialResult:
         result = SocialResult(backend=backend)
         result.facebook_url = clean_facebook_url(facebook_url)
@@ -230,15 +441,40 @@ class SocialEmailFinder:
             result.queries.append(query)
             email_hits = [hit for hit in hits if self._emails([hit])]
             if not result.facebook_url:
-                # Prefer profile links over aggregate/category pages.
-                profile_hits = [hit for hit in hits if not _is_aggregate(hit)]
-                result.facebook_url = self._facebook_from_hits(profile_hits or hits)
+                # Prefer profile links over aggregate/category pages; a city
+                # page must never become the venue's Facebook link.
+                profile_hits = [
+                    hit
+                    for hit in hits
+                    if not _is_aggregate(hit)
+                    and _facebook_page_relevant(hit, title, city)
+                ]
+                result.facebook_url = self._facebook_from_hits(profile_hits)
             if kind == "facebook":
-                # `site:facebook.com "<venue>"` snippets usually contain the
-                # address from the page's contact block. Facebook never shows
-                # these snippets for aggregate category pages, so they are safe;
-                # still drop obvious listing pages and hits with no address.
-                accepted = [hit for hit in email_hits if not _is_aggregate(hit)]
+                # A snippet address is accepted only when both the page and the
+                # mailbox can be tied to this venue.  This blocks city/tourism
+                # pages such as menuocity@gmail.com and unrelated corporate
+                # mailboxes that happen to mention the venue's name.
+                accepted: list[SearchHit] = []
+                for hit in email_hits:
+                    if _is_aggregate(hit):
+                        continue
+                    known_page = _same_facebook_page(hit, result.facebook_url)
+                    page_relevant = known_page or _facebook_page_relevant(
+                        hit, title, city
+                    )
+                    emails = self._emails([hit])
+                    if any(
+                        _email_matches_venue(
+                            email,
+                            title,
+                            city,
+                            website=restaurant_website,
+                            page_relevant=page_relevant,
+                        )
+                        for email in emails
+                    ):
+                        accepted.append(hit)
             else:
                 targets = [result.facebook_url] if result.facebook_url else []
                 targets += [restaurant_website] if restaurant_website else []

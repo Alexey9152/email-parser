@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  python main.py --stage emails --input data/restaurants_list.json --js\n"
             "  python main.py send --input data/final_contacts.xlsx\n"
             "  python main.py send --input data/final_contacts.xlsx --resume data/Resume.pdf --send\n"
+            "  python main.py facebook-login   (log in once for 18+ Facebook pages)\n"
             "  python main.py --list-categories\n"
             "  python ui.py   (map-based UI in the browser)\n"
         ),
@@ -152,6 +153,10 @@ def main(argv: list[str] | None = None) -> int:
         from .mailer import main as mailer_main
 
         return mailer_main(argv[1:])
+    if argv and argv[0] in {"facebook-login", "fb-login"}:
+        from .facebook_login import main as facebook_login_main
+
+        return facebook_login_main(argv[1:])
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose > 1 else logging.INFO if args.verbose else logging.WARNING,
@@ -243,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  JS render       : {stats.from_js}")
     print(f"  OpenStreetMap   : {stats.from_osm}")
     print(f"  guessed         : {stats.from_guess}")
+    print(f"  chains          : {stats.chains} (apply on their websites)")
     print(f"  not found       : {stats.not_found}")
     print(f"Excel: {settings.data_dir / 'final_contacts.xlsx'}")
     print(f"CSV  : {settings.data_dir / 'final_contacts.csv'}")

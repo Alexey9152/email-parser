@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
-from .extractors import emails_from_page, facebook_from_html
+from .extractors import clean_facebook_url, emails_from_page, facebook_from_html
 from .utils import normalize_url, unique
 
 log = logging.getLogger(__name__)
@@ -34,9 +34,17 @@ class RenderResult:
 class PlaywrightSiteRenderer:
     """Reuse one Chromium instance for many sites (sync API, main thread only)."""
 
-    def __init__(self, headless: bool = True, timeout_ms: int = 30_000):
+    def __init__(
+        self,
+        headless: bool = True,
+        timeout_ms: int = 30_000,
+        profile_dir: str = "",
+        storage_state: str = "",
+    ):
         self.headless = headless
         self.timeout_ms = timeout_ms
+        self.profile_dir = profile_dir
+        self.storage_state = storage_state
         self._pw = None
         self._browser = None
         self._context = None
@@ -45,18 +53,45 @@ class PlaywrightSiteRenderer:
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
-        self._context = self._browser.new_context(
-            locale="en-US",
-            viewport={"width": 1366, "height": 900},
-            user_agent=(
+        context_options = {
+            "locale": "en-US",
+            "viewport": {"width": 1366, "height": 900},
+            "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
-        )
+        }
+        if self.profile_dir:
+            try:
+                # A persistent profile keeps the Facebook login cookies and the
+                # device fingerprint.  That is what makes 18+ pages readable.
+                self._context = self._pw.chromium.launch_persistent_context(
+                    user_data_dir=self.profile_dir,
+                    headless=self.headless,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                    ],
+                    **context_options,
+                )
+                self._browser = self._context.browser
+            except Exception as exc:  # noqa: BLE001 - fall back to a clean browser
+                log.warning(
+                    "Facebook profile %s is unavailable (%s); using a clean browser",
+                    self.profile_dir,
+                    exc,
+                )
+                self.profile_dir = ""
+                self._context = None
+        if self._context is None:
+            self._browser = self._pw.chromium.launch(
+                headless=self.headless,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            self._context = self._browser.new_context(
+                storage_state=self.storage_state or None,
+                **context_options,
+            )
         self._context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
@@ -66,7 +101,7 @@ class PlaywrightSiteRenderer:
         try:
             if self._context:
                 self._context.close()
-            if self._browser:
+            if self._browser and not self.profile_dir:
                 self._browser.close()
         finally:
             if self._pw:
@@ -94,6 +129,13 @@ class PlaywrightSiteRenderer:
                 result.emails = unique(
                     result.emails + self._facebook_expand(page)
                 )
+                result.blocked = self._is_blocked(page)
+                if not result.blocked and not result.emails:
+                    # Some pages keep the address on a separate contact-info
+                    # subpage (e.g. /GrottoPizzaDE/directory_contact_info/).
+                    result.emails = unique(
+                        result.emails + self._facebook_contact_probe(page, start, result)
+                    )
             else:
                 # Many small venues only expose their Facebook link in the DOM
                 # or inside a JSON-LD block; remember it for the Facebook stage.
@@ -108,7 +150,7 @@ class PlaywrightSiteRenderer:
                         if emails:
                             result.emails = unique(result.emails + emails)
                             break
-            result.blocked = self._is_blocked(page)
+                result.blocked = self._is_blocked(page)
         except Exception as exc:  # noqa: BLE001 - browser errors are expected
             result.error = str(exc)[:200]
             log.debug("render failed for %s: %s", start, exc)
@@ -178,6 +220,29 @@ class PlaywrightSiteRenderer:
             pass
         return hrefs
 
+    def _facebook_contact_probe(
+        self, page, start: str, result: RenderResult
+    ) -> list[str]:
+        """Try Facebook's dedicated contact-info subpages if the main page is empty."""
+        found: list[str] = []
+        parts = urlsplit(clean_facebook_url(start) or start)
+        base = f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+        if "profile.php" in parts.path:
+            return found
+        if not base.endswith("/directory_contact_info"):
+            for suffix in ("/directory_contact_info/", "/about"):
+                if start.rstrip("/").endswith(suffix.rstrip("/")):
+                    continue
+                try:
+                    emails = self._visit(page, base + suffix, result.pages)
+                except Exception as exc:  # noqa: BLE001 - probe is best effort
+                    log.debug("Facebook contact probe failed for %s: %s", start, exc)
+                    continue
+                if emails:
+                    found.extend(emails)
+                    break
+        return unique(found)
+
     def _facebook_expand(self, page) -> list[str]:
         """Open the "Intro / About" block and re-extract the page HTML."""
         found: list[str] = []
@@ -201,10 +266,16 @@ class PlaywrightSiteRenderer:
                 if found:
                     break
 
-            # Some pages expose the address only on the About tab.
+            # Some pages expose the address only on the About / Contact info
+            # tab.  Facebook uses several URL shapes for the same panel.
             for selector in (
                 'a[href*="sk=about"]',
                 'a[href$="/about"]',
+                'a[href*="about_details"]',
+                'a[href*="about_contact_and_basic_info"]',
+                'a[href*="about_contact"]',
+                'div[role="button"]:has-text("Contact info")',
+                'div[role="button"]:has-text("About")',
             ):
                 locator = page.locator(selector)
                 if not locator.count():
@@ -247,8 +318,23 @@ class PlaywrightSiteRenderer:
         try:
             text = (page.content() or "")[:20_000].lower()
         except Exception:
-            return False
+            text = ""
+        try:
+            # Grotto-style 18+ walls are rendered text, often far into the
+            # HTML.  Read the visible body as well without scanning third-party
+            # captcha scripts in the rest of the document.
+            text += "\n" + (page.inner_text("body") or "").lower()
+        except Exception:
+            pass
         return any(
             marker in text
-            for marker in ("just a moment", "captcha", "are you a robot", "access denied")
+            for marker in (
+                "just a moment",
+                "captcha",
+                "are you a robot",
+                "access denied",
+                "18+ content",
+                "must log in",
+                "log in to continue",
+            )
         )

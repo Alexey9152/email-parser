@@ -10,6 +10,7 @@ import httpx
 from ..models import Restaurant
 from ..utils import Area, clean_whitespace
 from .base import MapsProviderBase, MapsProviderError
+from .social import facebook_from_payload
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class OutscraperProvider(MapsProviderBase):
             ),
             phone=str(item.get("phone") or "").strip(),
             website=(item.get("site") or item.get("website") or "").strip(),
+            facebook_url=facebook_from_payload(item),
             google_maps_url=(
                 item.get("location_link") or item.get("google_maps_url") or ""
             ).strip(),

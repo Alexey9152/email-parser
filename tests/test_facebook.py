@@ -91,6 +91,126 @@ def test_web_hits_must_be_relevant():
     assert result.source == "web"
 
 
+def test_city_facebook_page_email_is_rejected():
+    """A city/tourism page must not donate menuocity@gmail.com to a restaurant."""
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                # The title may mention the venue even when the URL is the city
+                # page; the mailbox check must still reject its address.
+                title="Ocean City Fish Company - Ocean City, MD | Facebook",
+                snippet="Contact the town: menuocity@gmail.com",
+                link="https://www.facebook.com/OceanCityMD/",
+            )
+        ]
+    }
+    result = finder.evaluate(
+        "Ocean City Fish Company",
+        plan,
+        hits,
+        city="Ocean City, MD",
+    )
+    assert result.emails == []
+    assert result.facebook_url == ""
+    assert result.unreliable
+
+
+def test_legacy_pages_url_is_recognized_as_venue_page():
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                title="Coastal Salt | Facebook",
+                snippet="info@coastalsaltoc.com",
+                link="https://www.facebook.com/pages/Coastal-Salt/123456",
+            )
+        ]
+    }
+    result = finder.evaluate("Coastal Salt", plan, hits, city="Ocean City, MD")
+    assert result.emails == ["info@coastalsaltoc.com"]
+    assert result.facebook_url == "https://www.facebook.com/pages/Coastal-Salt/123456"
+
+
+def test_shortened_page_slug_keeps_venue_email():
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                title="Macky's | Facebook",
+                snippet="info@mackys.com",
+                link="https://www.facebook.com/Mackys/",
+            )
+        ]
+    }
+    result = finder.evaluate(
+        "Macky's Bayside Bar and Grill",
+        plan,
+        hits,
+        city="Ocean City, MD",
+    )
+    assert result.emails == ["info@mackys.com"]
+    assert result.facebook_url == "https://www.facebook.com/Mackys"
+
+
+def test_pg_url_is_canonicalized_to_a_venue_page():
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                title="Coastal Salt | Facebook",
+                snippet="info@coastalsaltoc.com",
+                link="https://www.facebook.com/pg/Coastal-Salt",
+            )
+        ]
+    }
+    result = finder.evaluate("Coastal Salt", plan, hits, city="Ocean City, MD")
+    assert result.emails == ["info@coastalsaltoc.com"]
+    assert result.facebook_url == "https://www.facebook.com/Coastal-Salt"
+
+
+def test_venue_facebook_page_email_is_kept():
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                title="Ocean City Fish Company | Facebook",
+                snippet="info@oceancityfishcompany.com",
+                link="https://www.facebook.com/OceanCityFishCompany/",
+            )
+        ]
+    }
+    result = finder.evaluate(
+        "Ocean City Fish Company",
+        plan,
+        hits,
+        city="Ocean City, MD",
+    )
+    assert result.emails == ["info@oceancityfishcompany.com"]
+    assert result.facebook_url == "https://www.facebook.com/OceanCityFishCompany"
+
+
+def test_corporate_mailbox_mentioning_venue_is_rejected():
+    finder = SocialEmailFinder(None)
+    plan = [("facebook", "q")]
+    hits = {
+        "q": [
+            SearchHit(
+                title="The Bonfire | Facebook",
+                snippet="thebonfire@siriusxm.com",
+                link="https://www.facebook.com/TheBonfireSXM/",
+            )
+        ]
+    }
+    result = finder.evaluate("The Bonfire", plan, hits)
+    assert result.emails == []
+
+
 def test_aggregate_facebook_page_emails_are_rejected():
     """A category page lists dozens of venues: its snippet must be ignored."""
     finder = SocialEmailFinder(None)

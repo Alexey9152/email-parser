@@ -385,6 +385,13 @@ def clean_facebook_url(url: str) -> str:
             return f"https://www.facebook.com/profile.php?id={page_id}"
         return ""
 
+    if first == "pg" and len(segments) >= 2:
+        # /pg/Name is a legacy profile link; canonicalise it to /Name.
+        slug = segments[1]
+        if re.fullmatch(r"[A-Za-z0-9._-]+", slug) and slug.lower() not in FB_GENERIC_SLUGS:
+            return f"https://www.facebook.com/{slug}"
+        return ""
+
     if first in FB_LEGACY_PREFIXES:
         # /pages/Name/123 and /people/Name/123 are valid multi-segment URLs.
         return f"https://www.facebook.com{path}" if len(segments) >= 3 else ""

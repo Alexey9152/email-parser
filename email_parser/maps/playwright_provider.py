@@ -14,6 +14,7 @@ import re
 import time
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from ..extractors import clean_facebook_url, facebook_from_html
 from ..models import Restaurant
 from ..utils import Area, clean_whitespace, coords_from_maps_url, unique
 from .base import MapsProviderBase, MapsProviderError
@@ -235,6 +236,7 @@ class PlaywrightMapsProvider(MapsProviderBase):
         link = page.locator(DETAIL_SELECTORS["website"])
         if link.count():
             website = (link.first.get_attribute("href") or "").strip()
+        facebook_url = self._facebook(page, title)
 
         category = ""
         try:
@@ -252,6 +254,7 @@ class PlaywrightMapsProvider(MapsProviderBase):
             phone=phone,
             website=website,
             google_maps_url=page.url,
+            facebook_url=facebook_url,
             category=category,
             source_query=query,
             rating=rating,
@@ -260,6 +263,25 @@ class PlaywrightMapsProvider(MapsProviderBase):
             longitude=coords[1] if coords else None,
             place_id=self._place_id(url),
         )
+
+    @staticmethod
+    def _facebook(page, title: str) -> str:
+        """Read a Facebook profile linked from a Google Maps place card."""
+        try:
+            anchors = page.locator("a[href]")
+            for index in range(min(anchors.count(), 600)):
+                href = (anchors.nth(index).get_attribute("href") or "").strip()
+                lowered = href.lower()
+                if "facebook.com" in lowered or "fb.me" in lowered or "fb.com" in lowered:
+                    found = clean_facebook_url(href)
+                    if found:
+                        return found
+        except Exception:
+            pass
+        try:
+            return facebook_from_html(page.content(), title)
+        except Exception:
+            return ""
 
     @staticmethod
     def _rating(page) -> tuple[float | None, int | None]:

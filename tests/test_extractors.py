@@ -98,6 +98,10 @@ def test_facebook_urls_are_reduced_to_page_profiles():
         clean_facebook_url("https://www.facebook.com/pages/Joes/123456")
         == "https://www.facebook.com/pages/Joes/123456"
     )
+    assert (
+        clean_facebook_url("https://www.facebook.com/pg/JoesDiner")
+        == "https://www.facebook.com/JoesDiner"
+    )
     assert clean_facebook_url("https://www.facebook.com/sharer/sharer.php?u=x") == ""
     assert clean_facebook_url("https://www.facebook.com/help") == ""
     assert clean_facebook_url("https://www.facebook.com/tr?id=1") == ""

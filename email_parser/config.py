@@ -56,6 +56,11 @@ class Settings:
     http_timeout: float = 15.0
     http_workers: int = 8
     headless: bool = True
+    # Optional authenticated Facebook session (created by ``facebook-login``).
+    # A persistent Chromium profile also passes 18+ interstitials that hide the
+    # contact block from logged-out visitors.
+    facebook_profile_dir: str = ""
+    facebook_storage_state: str = ""
 
     # --- outgoing mail (python main.py send) -----------------------------
     smtp_host: str = ""
@@ -75,7 +80,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        return cls(
+        settings = cls(
             maps_provider=_env("MAPS_PROVIDER", "osm").lower(),
             apify_token=_env("APIFY_TOKEN"),
             apify_actor=_env("APIFY_ACTOR", "compass/crawler-google-places"),
@@ -90,6 +95,8 @@ class Settings:
             http_timeout=_env_float("HTTP_TIMEOUT", 15.0),
             http_workers=max(1, _env_int("HTTP_WORKERS", 8)),
             headless=_env_bool("HEADLESS", True),
+            facebook_profile_dir=_env("FACEBOOK_PROFILE_DIR"),
+            facebook_storage_state=_env("FACEBOOK_STORAGE_STATE"),
             smtp_host=_env("SMTP_HOST"),
             smtp_port=_env_int("SMTP_PORT", 587),
             smtp_user=_env("SMTP_USER"),
@@ -103,6 +110,13 @@ class Settings:
             mail_delay=_env_float("MAIL_DELAY", 30.0),
             mail_daily_limit=max(1, _env_int("MAIL_DAILY_LIMIT", 50)),
         )
+        if not settings.facebook_profile_dir:
+            default_profile = PROJECT_ROOT / "data" / "facebook-profile"
+            if (default_profile / "Default").exists() or (
+                default_profile / "Local State"
+            ).exists():
+                settings.facebook_profile_dir = str(default_profile)
+        return settings
 
     def ensure_data_dir(self) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)

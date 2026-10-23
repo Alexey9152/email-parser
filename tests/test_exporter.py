@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from openpyxl import load_workbook
 
-from email_parser.exporter import save_results_xlsx
+from email_parser.exporter import load_results_xlsx, save_results_xlsx
 from email_parser.models import (
+    STATUS_CHAIN,
     STATUS_FB,
     STATUS_GUESS,
     STATUS_NOT_FOUND,
@@ -79,9 +80,10 @@ def test_xlsx_has_links_filters_and_summary(tmp_path):
     assert sheet["J3"].value == "https://www.facebook.com/shawarmastand"
     assert sheet["M2"].value == "Найден на сайте"
     assert sheet.freeze_panes == "B2"
-    assert sheet.auto_filter.ref == "A1:U5"
+    assert sheet.auto_filter.ref == "A1:V5"
     assert sheet.max_row == 5
     assert sheet["T1"].value == "Откуда основной e-mail"
+    assert sheet["V1"].value == "Сеть"
 
     summary = workbook["Сводка"]
     values = [cell.value for row in summary.iter_rows() for cell in row]
@@ -89,6 +91,36 @@ def test_xlsx_has_links_filters_and_summary(tmp_path):
     assert any(
         isinstance(value, str) and "Предположение" in value for value in values
     )
+
+
+def test_chain_rows_get_separate_sheet_and_roundtrip(tmp_path):
+    path = tmp_path / "chains.xlsx"
+    save_results_xlsx(
+        path,
+        [
+            ContactResult(
+                title="Dunkin'",
+                website="https://www.dunkindonuts.com/",
+                chain="Dunkin'",
+                status=STATUS_CHAIN,
+            ),
+            ContactResult(
+                title="Coastal Salt",
+                emails=["info@coastalsaltoc.com"],
+                status=STATUS_SITE,
+            ),
+        ],
+    )
+    workbook = load_workbook(path)
+    assert workbook.sheetnames == ["Контакты", "Сети", "Сводка"]
+    assert workbook["Контакты"]["V2"].value == "Dunkin'"
+    assert workbook["Сети"]["A2"].value == "Dunkin'"
+    assert workbook["Сети"]["G2"].value == "Сеть — заявка на сайте"
+
+    loaded = load_results_xlsx(path)
+    assert loaded[0].chain == "Dunkin'"
+    assert loaded[0].status == STATUS_CHAIN
+    assert loaded[0].emails == []
 
 
 def test_csv_contains_new_columns(tmp_path):
