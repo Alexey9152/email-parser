@@ -50,36 +50,36 @@ DEFAULT_RESUME_PATH = PROJECT_ROOT / "data" / "resume.pdf"
 
 DEFAULT_TEMPLATE = """Dear Manager,
 
-My name is Alex Los, and I am a Belarusian university student. I am writing to express my interest in joining the team at {restaurant} as a server or in another available seasonal role for the upcoming Summer season through the J-1 Work and Travel program. For me, this program is a unique opportunity to experience life in the United States, gain international practice, and engage in cultural exchange.
+My name is **Alex Los**, and I am a Belarusian university student. I am writing to express my interest in joining the team at {restaurant} as a server or in another available seasonal role for the upcoming Summer season through the J-1 Work and Travel program. For me, this program is a unique opportunity to experience life in the United States, gain international practice, and engage in cultural exchange.
 
 {found_note}
 
 I am interested in a variety of positions, including:
 
-Server / Busser
-Cashier / Food Service Worker
-Line Cook / Kitchen Support
+- **Server / Busser**
+- **Cashier / Food Service Worker**
+- **Line Cook / Kitchen Support**
 
-I have 2 years of hands-on experience working as a server in a high-volume restaurant in Belarus (Vasilki), where my background includes active customer service, operating POS systems, handling cash, preparing beverages, and assisting with food preparation.
+I have **2 years of hands-on experience** working as a server in a high-volume restaurant in Belarus (Vasilki), where my background includes active customer service, operating POS systems, handling cash, preparing beverages, and assisting with food preparation.
 
-I have an Upper-Intermediate level of English and can interact with guests comfortably and efficiently. I am hardworking, responsible, friendly, adaptable, and willing to learn new skills quickly.
+I have an **Upper-Intermediate level of English** and can interact with guests comfortably and efficiently. I am hardworking, responsible, friendly, adaptable, and willing to learn new skills quickly.
 
 Regarding paperwork: I am fully authorized to work in the U.S. for the summer under the J-1 Work and Travel program. All required visa sponsorship, legal documentation, and insurance are already fully arranged.
 
-My availability & work schedule:
+**My availability & work schedule:**
 
-Dates: June 28, 2027 – September 1, 2027
-Working Hours: Ready to work 40–60 hours per week (fully available for overtime, flexible shifts, and weekend work).
+- **Dates:** June 28, 2027 – September 1, 2027
+- **Working Hours:** Ready to work 40–60 hours per week (fully available for overtime, flexible shifts, and weekend work).
 
 {resume_note}
 
 Thank you for your time and consideration.
 
-Best regards,
+**Best regards,**
 
-Alex Los
+**Alex Los**
 
-Linkedin: linkedin.com/in/aleksey-los/
+LinkedIn: linkedin.com/in/aleksey-los/
 Phone / WhatsApp: +375296263124
 """
 
@@ -152,11 +152,19 @@ def render_text(template: str, values: dict[str, str]) -> str:
 
 
 def load_template(path: Path | None = None) -> str:
-    candidate = path or DEFAULT_TEMPLATE_PATH
-    if candidate and candidate.exists():
-        return candidate.read_text(encoding="utf-8")
     if path is not None:
+        candidate = Path(path)
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8")
         raise FileNotFoundError(f"template not found: {path}")
+
+    # The local sending UI stores the user's edited letter under data/.  The
+    # CLI should use the same text by default, otherwise edits made in the UI
+    # would silently disappear in ``python main.py send``.
+    saved = PROJECT_ROOT / "data" / "application_email.txt"
+    candidate = saved if saved.exists() else DEFAULT_TEMPLATE_PATH
+    if candidate.exists():
+        return candidate.read_text(encoding="utf-8")
     return DEFAULT_TEMPLATE
 
 
@@ -243,28 +251,128 @@ def select_recipients(
 
 
 # ------------------------------------------------------------------- message
+# The editable letter uses a deliberately small Markdown subset:
+# ``**bold**`` and lines starting with "- ", "* " or "1. ".  Keeping the
+# format tiny makes it obvious what a manager will actually see and avoids
+# pulling a full Markdown renderer into the mailer.
+_URL_RE = re.compile(
+    r"(?i)(?<![\w@])(?:https?://[^\s<>*]+|www\.[^\s<>*]+|linkedin\.com/[^\s<>*]+)"
+)
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _trim_url(url: str) -> str:
+    """Drop sentence punctuation and a closing parenthesis around a URL."""
+    url = url.rstrip(".,;:!?'\"")
+    while url.endswith(")") and url.count("(") < url.count(")"):
+        url = url[:-1]
+    while url.endswith("]") and url.count("[") < url.count("]"):
+        url = url[:-1]
+    return url
+
+
 def _linkify_html(text: str) -> str:
-    pattern = re.compile(r"(https?://[^\s<]+)")
+    """Turn explicit URLs and the bare LinkedIn profile into anchors.
+
+    ``text`` is already HTML-escaped.  Links are replaced by placeholders so
+    the bold pass cannot accidentally match inside an ``href`` attribute.
+    """
+    links: list[tuple[str, str]] = []
 
     def replace(match: re.Match[str]) -> str:
-        url = html_lib.unescape(match.group(1)).rstrip(".,;:!?")
-        return f'<a href="{html_lib.escape(url)}">{html_lib.escape(url)}</a>'
+        url = _trim_url(html_lib.unescape(match.group(0)))
+        lowered = url.lower()
+        if lowered.startswith("linkedin.com/"):
+            href = "https://www." + url
+        elif lowered.startswith("www."):
+            href = "https://" + url
+        else:
+            href = url
+        anchor = (
+            f'<a href="{html_lib.escape(href)}" target="_blank" '
+            f'rel="noopener noreferrer" style="color:#0b66c3;">'
+            f"{html_lib.escape(url)}</a>"
+        )
+        token = f"\x00LINK{len(links)}\x00"
+        links.append((token, anchor))
+        return token
 
-    return pattern.sub(replace, text)
+    linked = _URL_RE.sub(replace, text)
+    linked = _BOLD_RE.sub(r"<strong>\1</strong>", linked)
+    for token, anchor in links:
+        linked = linked.replace(token, anchor)
+    return linked
 
 
 def body_to_html(body: str) -> str:
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", body or "") if part.strip()]
-    chunks = []
-    for paragraph in paragraphs:
-        escaped = html_lib.escape(paragraph).replace("\n", "<br>")
-        chunks.append(f"<p>{_linkify_html(escaped)}</p>")
+    """Render the letter as semantic HTML: paragraphs, bold text and lists."""
+    text = (body or "").replace("\r\n", "\n")
+    chunks: list[str] = []
+    paragraph: list[str] = []
+    list_type = ""
+    list_items: list[str] = []
+
+    def flush_paragraph() -> None:
+        if not paragraph:
+            return
+        content = "<br>".join(_linkify_html(line) for line in paragraph)
+        chunks.append(f'<p style="margin:0 0 13px;">{content}</p>')
+        paragraph.clear()
+
+    def flush_list() -> None:
+        nonlocal list_type
+        if not list_items:
+            list_type = ""
+            return
+        items = "".join(
+            f'<li style="margin:3px 0;">{_linkify_html(item)}</li>'
+            for item in list_items
+        )
+        style = "margin:0 0 13px 22px;padding:0;"
+        chunks.append(f'<{list_type} style="{style}">{items}</{list_type}>')
+        list_items.clear()
+        list_type = ""
+
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
+        if not line.strip():
+            flush_paragraph()
+            flush_list()
+            continue
+
+        bullet = re.match(r"^\s*[-*•]\s+(.*)$", line)
+        numbered = re.match(r"^\s*\d+[.)]\s+(.*)$", line)
+        if bullet or numbered:
+            flush_paragraph()
+            kind = "ul" if bullet else "ol"
+            if list_type and list_type != kind:
+                flush_list()
+            list_type = kind
+            list_items.append((bullet or numbered).group(1))
+        else:
+            flush_list()
+            paragraph.append(line.strip())
+
+    flush_paragraph()
+    flush_list()
     return (
-        '<html><body style="font-family: Arial, sans-serif; font-size: 14px; '
-        'line-height: 1.5; color: #222;">'
+        '<html><head><meta charset="utf-8"></head>'
+        '<body style="font-family: Arial, sans-serif; font-size: 14px; '
+        'line-height: 1.55; color: #222; margin: 0; padding: 18px;">'
         + "".join(chunks)
         + "</body></html>"
     )
+
+
+def body_to_plain(body: str) -> str:
+    """Strip the tiny Markdown subset for the text/plain alternative."""
+    text = (body or "").replace("\r\n", "\n")
+    text = _BOLD_RE.sub(r"\1", text)
+    lines = []
+    for line in text.split("\n"):
+        line = re.sub(r"^(\s*)[-*•]\s+", r"\1• ", line)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def build_message(
@@ -288,6 +396,7 @@ def build_message(
     body = render_text(template, values)
     subject = render_text(subject_template, values)
     body = body.replace("\r\n", "\n").strip() + "\n"
+    plain_body = body_to_plain(body)
 
     from_email = (settings.mail_from or settings.smtp_user or "").strip()
     from_name = clean_whitespace(settings.mail_from_name)
@@ -303,7 +412,7 @@ def build_message(
     message["Message-ID"] = make_msgid(domain=domain or None)
     message["X-Mailer"] = "email-parser Work & Travel mailer"
 
-    message.set_content(body)
+    message.set_content(plain_body)
     message.add_alternative(body_to_html(body), subtype="html")
 
     if has_resume:
@@ -451,6 +560,90 @@ def send_all(
         except Exception:
             pass
     return sent, failed
+
+
+def send_one(
+    row: ContactResult,
+    *,
+    settings: Settings,
+    template: str,
+    subject_template: str,
+    resume_path: Path | None,
+    log_path: Path,
+    daily_limit: int,
+) -> dict:
+    """Send exactly one confirmed letter and record it in the sent log.
+
+    The UI intentionally has no batch endpoint: every call corresponds to one
+    recipient and one explicit confirmation in the browser.  The checks below
+    are repeated on the server so a stale page cannot send a duplicate or
+    exceed the daily limit.
+    """
+    recipient = row.primary_email.strip().lower()
+    if not recipient:
+        raise RuntimeError("У заведения нет основного e-mail.")
+
+    sent_log = load_sent_log(log_path)
+    previous = sent_log.get(recipient)
+    if previous and previous.get("status", "sent") == "sent":
+        sent_at = str(previous.get("sent_at", ""))[:16].replace("T", " ")
+        raise RuntimeError(
+            f"Письмо на {recipient} уже отправлено"
+            + (f" ({sent_at})" if sent_at else "")
+            + "."
+        )
+
+    limit = max(1, int(daily_limit or 1))
+    today = sent_today(sent_log)
+    if today >= limit:
+        raise RuntimeError(
+            f"Дневной лимит достигнут: {today}/{limit}. "
+            "Увеличьте лимит или продолжите завтра."
+        )
+
+    if not (settings.mail_from or settings.smtp_user):
+        raise RuntimeError("Не указан e-mail отправителя.")
+    if not settings.smtp_host.strip():
+        raise RuntimeError("Не указан SMTP-сервер.")
+
+    message = build_message(
+        row,
+        settings=settings,
+        template=template,
+        subject_template=subject_template,
+        resume_path=resume_path,
+    )
+    server = open_smtp(settings)
+    try:
+        refused = server.send_message(message)
+        if refused:
+            raise smtplib.SMTPException(
+                f"SMTP отказался принять адрес: {', '.join(refused)}"
+            )
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
+    entry = {
+        "restaurant": row.title,
+        "subject": str(message["Subject"]),
+        "source": row.primary_email_source,
+        "source_url": row.primary_email_source_url,
+        "sent_at": datetime.now().isoformat(timespec="seconds"),
+        "message_id": str(message.get("Message-ID", "")),
+        "status": "sent",
+    }
+    sent_log[recipient] = entry
+    save_sent_log(log_path, sent_log)
+    return {
+        "email": recipient,
+        "entry": entry,
+        "message_id": entry["message_id"],
+        "subject": entry["subject"],
+        "sent_today": today + 1,
+    }
 
 
 # ------------------------------------------------------------------ preview

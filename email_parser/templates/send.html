@@ -1,0 +1,1258 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>email-parser — отправка писем</title>
+<style>
+  :root {
+    --bg: #0f1720;
+    --panel: #17222c;
+    --panel-2: #1e2b37;
+    --panel-3: #243443;
+    --text: #e6edf3;
+    --muted: #93a4b5;
+    --accent: #f08c00;
+    --accent-2: #ffa94d;
+    --green: #37b24d;
+    --green-soft: #183a24;
+    --red: #e03131;
+    --red-soft: #3b1d1d;
+    --border: #2b3a48;
+    --blue-soft: #172d44;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { min-height: 100%; margin: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(1200px 500px at 90% -10%, rgba(240,140,0,.07), transparent 60%),
+      var(--bg);
+    color: var(--text);
+  }
+  header {
+    min-height: 58px; padding: 12px 20px;
+    background: linear-gradient(90deg, #1b2a38, #16212b);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 1000;
+  }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 12.5px; flex: 1; min-width: 180px; }
+  nav { display: flex; gap: 6px; }
+  nav a {
+    text-decoration: none; color: var(--muted); font-size: 13px; font-weight: 600;
+    padding: 7px 12px; border-radius: 8px; border: 1px solid transparent;
+  }
+  nav a:hover { color: var(--accent-2); border-color: var(--border); }
+  nav a.active { color: #1b1206; background: var(--accent); border-color: var(--accent); }
+  .layout {
+    display: grid;
+    grid-template-columns: 430px minmax(310px, .9fr) minmax(420px, 1.15fr);
+    gap: 14px;
+    padding: 14px;
+    height: calc(100vh - 59px);
+    min-height: 620px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 15px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.15);
+  }
+  .panel h2 {
+    margin: 0 0 10px; font-size: 15px; letter-spacing: .2px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .panel h2 small { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+  .section { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+  .section:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+  .section-title {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    margin-bottom: 9px;
+  }
+  .section-title h3 { margin: 0; font-size: 13.5px; }
+  .section-title span { font-size: 11.5px; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 11.5px; line-height: 1.45; margin: 7px 0 0; }
+  .hint b { color: var(--text); }
+  label.field { display: block; font-size: 11.5px; color: var(--muted); margin: 11px 0 5px; }
+  input[type=text], input[type=email], input[type=password], input[type=number],
+  input[type=search], select, textarea {
+    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font-size: 13.5px; outline: none;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  input[readonly] { color: var(--muted); }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 12.5px; cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-2); }
+  button:disabled { opacity: .5; cursor: wait; }
+  button.primary {
+    background: linear-gradient(180deg, var(--accent-2), var(--accent));
+    color: #1b1206; font-weight: 700; border: 0;
+  }
+  button.primary:hover:not(:disabled) { color: #1b1206; filter: brightness(1.06); }
+  button.danger {
+    background: linear-gradient(180deg, #ff6b6b, #d94848);
+    color: #240606; font-weight: 700; border: 0;
+  }
+  button.ghost { background: transparent; }
+  button.small { padding: 5px 8px; font-size: 11.5px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+  .row.tight { gap: 6px; }
+  .report-row { display: flex; gap: 7px; align-items: stretch; }
+  .report-row select { flex: 1; min-width: 0; }
+  .toolbar {
+    display: flex; gap: 5px; flex-wrap: wrap; align-items: center;
+    padding: 7px; border: 1px solid var(--border); border-bottom: 0;
+    border-radius: 8px 8px 0 0; background: var(--panel-2);
+  }
+  .toolbar select { width: auto; max-width: 190px; padding: 6px 8px; font-size: 11.5px; }
+  #letter {
+    min-height: 330px; border-radius: 0 0 8px 8px;
+    font-family: "Segoe UI", system-ui, sans-serif; line-height: 1.5;
+  }
+  .checks { display: grid; gap: 7px; margin-top: 9px; }
+  .checks label { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; cursor: pointer; }
+  .checks input { accent-color: var(--accent); margin-top: 2px; }
+  .save-line { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .save-state { font-size: 11.5px; color: var(--muted); }
+  .save-state.ok { color: #8ce99a; }
+  .save-state.error { color: #ff8787; }
+  .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 10px; }
+  .stat {
+    padding: 7px 9px; border-radius: 8px; background: var(--panel-2);
+    border: 1px solid var(--border); color: var(--muted); font-size: 10.8px;
+    line-height: 1.25;
+  }
+  .stat b { display: block; color: var(--text); font-size: 17px; margin-bottom: 2px; }
+  .stat.accent b { color: var(--accent-2); }
+  .recipients-panel { display: flex; flex-direction: column; padding-bottom: 0; }
+  .recipients-panel .list-head { position: sticky; top: 0; z-index: 2; background: var(--panel); padding-bottom: 8px; }
+  #recipient-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .recipient {
+    display: block; width: 100%; text-align: left; margin-bottom: 7px; padding: 10px;
+    border-radius: 9px; border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--text); cursor: pointer; transition: .15s border, .15s background;
+  }
+  .recipient:hover { border-color: #52687c; }
+  .recipient.active { border-color: var(--accent); background: #263140; }
+  .recipient.sent { opacity: .64; }
+  .recipient-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .recipient-title { font-size: 13px; font-weight: 700; line-height: 1.3; }
+  .recipient-email { color: var(--accent-2); font-size: 12px; margin-top: 4px; word-break: break-all; }
+  .recipient-meta { color: var(--muted); font-size: 10.8px; line-height: 1.35; margin-top: 4px; }
+  .badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .badge {
+    display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); font-size: 9.8px;
+    line-height: 1.35; white-space: nowrap; max-width: 100%;
+  }
+  .badge.green { color: #8ce99a; border-color: #2b6b40; background: var(--green-soft); }
+  .badge.orange { color: #ffd8a8; border-color: #8a5a1f; background: #3a2a14; }
+  .badge.red { color: #ffc9c9; border-color: #7a2b2b; background: var(--red-soft); }
+  .badge.blue { color: #a5d8ff; border-color: #235579; background: var(--blue-soft); }
+  .empty {
+    padding: 22px 12px; text-align: center; color: var(--muted); font-size: 12.5px;
+    border: 1px dashed var(--border); border-radius: 10px; line-height: 1.55;
+  }
+  .recipient-search { margin-bottom: 8px; }
+  .preview-panel { display: flex; flex-direction: column; overflow: hidden; }
+  .preview-head { flex: none; }
+  .preview-title { font-size: 16px; font-weight: 700; line-height: 1.3; margin-bottom: 3px; }
+  .preview-email { color: var(--accent-2); font-size: 12.5px; word-break: break-all; }
+  .preview-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .preview-links a {
+    color: #a5d8ff; text-decoration: none; font-size: 11px;
+    border: 1px solid #235579; background: var(--blue-soft);
+    padding: 3px 7px; border-radius: 999px;
+  }
+  .preview-links a:hover { border-color: #4dabf7; }
+  .preview-note { color: var(--muted); font-size: 11.5px; line-height: 1.4; margin-top: 8px; }
+  .preview-meta {
+    display: grid; gap: 4px; margin: 10px 0 8px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2);
+    font-size: 11px; color: var(--muted);
+  }
+  .preview-meta b { color: var(--text); font-weight: 600; }
+  .preview-meta .subject { color: var(--text); font-size: 12px; }
+  .iframe-wrap {
+    flex: 1; min-height: 260px; border: 1px solid var(--border); border-radius: 9px;
+    overflow: hidden; background: #fff;
+  }
+  #preview-frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+  .preview-actions { flex: none; display: flex; gap: 8px; align-items: center; padding-top: 10px; }
+  .preview-actions button { flex: 1; padding: 12px; font-size: 14px; }
+  #send-btn { font-weight: 700; }
+  .preview-status { flex: none; min-height: 17px; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .preview-status.error { color: #ff8787; }
+  .preview-status.ok { color: #8ce99a; }
+  details.plain { margin-top: 8px; flex: none; }
+  details.plain summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
+  details.plain pre {
+    max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 11px;
+    line-height: 1.45; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px; margin: 7px 0 0; color: #c9d6e3;
+  }
+  .modal {
+    position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center;
+    justify-content: center; padding: 20px; background: rgba(5, 10, 15, .72);
+    backdrop-filter: blur(3px);
+  }
+  .modal-card {
+    width: min(540px, 100%); background: var(--panel); border: 1px solid #4a6175;
+    border-radius: 14px; padding: 20px; box-shadow: 0 22px 70px rgba(0,0,0,.55);
+  }
+  .modal-card h3 { margin: 0 0 7px; font-size: 18px; }
+  .modal-card p { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 0 0 13px; }
+  .confirm-box {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px;
+    padding: 11px 12px; display: grid; gap: 7px; font-size: 12.5px;
+  }
+  .confirm-row { display: grid; grid-template-columns: 86px 1fr; gap: 8px; }
+  .confirm-row span:first-child { color: var(--muted); }
+  .confirm-row b { word-break: break-word; }
+  .modal-warning {
+    margin-top: 11px; color: #ffd8a8; background: #3a2a14; border: 1px solid #8a5a1f;
+    border-radius: 8px; padding: 8px 10px; font-size: 11.5px; line-height: 1.45;
+  }
+  .modal-error { min-height: 18px; color: #ff8787; font-size: 12px; margin-top: 8px; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 13px; }
+  .modal-actions button { min-width: 120px; }
+  #toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(20px);
+    z-index: 3000; min-width: min(520px, calc(100vw - 40px)); max-width: 760px;
+    padding: 11px 15px; border-radius: 10px; border: 1px solid #2b6b40;
+    background: #15301f; color: #d3f9d8; font-size: 12.5px; line-height: 1.4;
+    box-shadow: 0 12px 34px rgba(0,0,0,.4); opacity: 0; pointer-events: none;
+    transition: .2s opacity, .2s transform;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.error { border-color: #7a2b2b; background: #341717; color: #ffc9c9; }
+  a { color: var(--accent-2); }
+  @media (max-width: 1180px) {
+    .layout { grid-template-columns: 390px 1fr; height: auto; min-height: 0; }
+    .panel { max-height: 760px; }
+    .preview-panel { grid-column: 1 / -1; min-height: 600px; }
+  }
+  @media (max-width: 760px) {
+    .layout { display: block; padding: 10px; }
+    .panel { max-height: none; margin-bottom: 10px; }
+    header .sub { display: none; }
+    .preview-panel { min-height: 560px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>email-parser</h1>
+  <span class="sub">Work &amp; Travel · письма с подтверждением каждого получателя</span>
+  <nav>
+    <a href="/">Поиск заведений</a>
+    <a href="/send" class="active">Письма</a>
+  </nav>
+</header>
+
+<main class="layout">
+  <aside class="panel">
+    <section class="section">
+      <div class="section-title">
+        <h3>Отчёт</h3>
+        <span id="report-modified"></span>
+      </div>
+      <div class="report-row">
+        <select id="report" aria-label="Excel-отчёт"></select>
+        <button class="small" id="refresh-reports" type="button" title="Обновить список отчётов">↻</button>
+      </div>
+      <div class="stats" id="stats"></div>
+      <p class="hint" id="report-hint">Выберите отчёт, созданный на вкладке «Поиск заведений».</p>
+    </section>
+
+    <section class="section">
+      <div class="section-title">
+        <h3>Письмо</h3>
+        <span>сохраняется на этом компьютере</span>
+      </div>
+      <label class="field" for="subject">Тема</label>
+      <input id="subject" type="text" autocomplete="off">
+      <label class="field" for="letter">Текст письма</label>
+      <div class="toolbar">
+        <button class="small" type="button" id="bold-btn" title="Жирный текст (Ctrl+B)"><b>B</b></button>
+        <button class="small" type="button" id="bullet-btn" title="Пункт списка">• Список</button>
+        <select id="placeholder" aria-label="Подстановка">
+          <option value="{restaurant}">Название заведения</option>
+          <option value="{found_note}">Где найден e-mail</option>
+          <option value="{email}">E-mail получателя</option>
+          <option value="{source}">Источник</option>
+          <option value="{source_link}">Ссылка на источник</option>
+          <option value="{website}">Сайт</option>
+          <option value="{facebook}">Facebook</option>
+          <option value="{maps}">Google Maps</option>
+          <option value="{address}">Адрес</option>
+          <option value="{phone}">Телефон</option>
+          <option value="{category}">Категория</option>
+          <option value="{resume_note}">Строка про резюме</option>
+        </select>
+        <button class="small" type="button" id="insert-placeholder">Вставить</button>
+        <button class="small ghost" type="button" id="reset-letter">Сбросить</button>
+      </div>
+      <textarea id="letter" spellcheck="true" aria-label="Текст письма"></textarea>
+      <p class="hint">Для жирного текста оберните слова в <b>**две звёздочки**</b>.
+        Строки, начинающиеся с <b>- </b>, станут маркированным списком.
+        Ссылка <b>linkedin.com/in/aleksey-los/</b> в HTML-письме кликабельна.</p>
+    </section>
+
+    <section class="section">
+      <div class="section-title"><h3>Отправитель</h3></div>
+      <div class="row">
+        <div>
+          <label class="field" for="from-name">Имя</label>
+          <input id="from-name" type="text" value="Alex Los" autocomplete="name">
+        </div>
+        <div>
+          <label class="field" for="from-email">E-mail</label>
+          <input id="from-email" type="email" placeholder="you@gmail.com" autocomplete="email">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label class="field" for="reply-to">Reply-To (необязательно)</label>
+          <input id="reply-to" type="email" autocomplete="email">
+        </div>
+        <div>
+          <label class="field" for="bcc">BCC себе (необязательно)</label>
+          <input id="bcc" type="email" autocomplete="email">
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-title"><h3>SMTP</h3><span>пароль приложения, не обычный</span></div>
+      <label class="field" for="smtp-preset">Сервис</label>
+      <select id="smtp-preset">
+        <option value="">Заполнить вручную / другой сервис</option>
+        <option value="gmail">Gmail</option>
+        <option value="yandex">Яндекс Почта</option>
+        <option value="mailru">Mail.ru</option>
+        <option value="outlook">Outlook / Hotmail</option>
+      </select>
+      <div class="row">
+        <div style="flex:1.6">
+          <label class="field" for="smtp-host">SMTP-сервер</label>
+          <input id="smtp-host" type="text" placeholder="smtp.gmail.com" autocomplete="off">
+        </div>
+        <div style="flex:.55">
+          <label class="field" for="smtp-port">Порт</label>
+          <input id="smtp-port" type="number" min="1" max="65535" value="587">
+        </div>
+      </div>
+      <label class="field" for="smtp-user">Логин SMTP</label>
+      <input id="smtp-user" type="text" placeholder="you@gmail.com" autocomplete="username">
+      <label class="field" for="smtp-password">Пароль SMTP</label>
+      <div class="row tight">
+        <input id="smtp-password" type="password" autocomplete="current-password" placeholder="Пароль приложения">
+        <button class="small ghost" type="button" id="toggle-password" style="flex:0 0 auto">Показать</button>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="smtp-ssl"> SSL / неявный TLS (обычно порт 465)</label>
+        <label><input type="checkbox" id="smtp-starttls" checked> STARTTLS (обычно порт 587)</label>
+        <label><input type="checkbox" id="remember-password"> Сохранить пароль на этом компьютере</label>
+      </div>
+      <p class="hint" id="password-hint">Пароль не сохраняется, пока не отмечена галочка выше.</p>
+      <div class="row" style="margin-top:9px;align-items:end">
+        <div>
+          <label class="field" for="daily-limit">Дневной лимит</label>
+          <input id="daily-limit" type="number" min="1" max="1000" value="50">
+        </div>
+        <button type="button" id="test-smtp">Проверить SMTP</button>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-title"><h3>Резюме</h3><span id="resume-state"></span></div>
+      <label class="field" for="resume">Файл на диске</label>
+      <input id="resume" type="text" placeholder="data/resume.pdf" autocomplete="off">
+      <div class="row" style="margin-top:8px;align-items:center">
+        <input type="file" id="resume-file" accept=".pdf,.doc,.docx,.rtf,.txt" style="display:none">
+        <button type="button" id="upload-resume">Загрузить резюме…</button>
+        <button type="button" class="ghost" id="clear-resume">Убрать</button>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="attach-resume"> Прикреплять резюме к каждому письму</label>
+      </div>
+    </section>
+
+    <div class="save-line">
+      <button class="primary" type="button" id="save-settings">Сохранить письмо и настройки</button>
+      <span class="save-state" id="save-state"></span>
+    </div>
+    <p class="hint">Сохранение: <span id="state-path">data/mailer_settings.json</span>.
+      Письмо — <span id="letter-path">data/application_email.txt</span>.
+      Журнал отправок — <span id="log-path">data/sent_log.json</span>.</p>
+  </aside>
+
+  <section class="panel recipients-panel">
+    <div class="list-head">
+      <h2>Получатели <small id="recipients-count"></small></h2>
+      <input id="recipient-search" class="recipient-search" type="search"
+             placeholder="Поиск по названию, e-mail, адресу…">
+      <p class="hint" id="recipients-hint">Каждое письмо отправляется отдельно и только после подтверждения.</p>
+    </div>
+    <div id="recipient-list"></div>
+  </section>
+
+  <section class="panel preview-panel">
+    <div class="preview-head">
+      <div class="preview-title" id="preview-title">Выберите получателя</div>
+      <div class="preview-email" id="preview-email"></div>
+      <div class="badges" id="preview-badges"></div>
+      <div class="preview-links" id="preview-links"></div>
+      <div class="preview-note" id="preview-note"></div>
+      <div class="preview-meta" id="preview-meta" hidden></div>
+    </div>
+    <div class="empty" id="preview-empty">Слева выберите заведение — здесь появится готовое письмо с подставленными названием, e-mail и источником.</div>
+    <div class="iframe-wrap" id="iframe-wrap" hidden>
+      <iframe id="preview-frame" title="Предпросмотр письма"></iframe>
+    </div>
+    <div class="preview-status" id="preview-status"></div>
+    <div class="preview-actions">
+      <button class="primary" type="button" id="send-btn" disabled>Отправить письмо</button>
+    </div>
+    <details class="plain">
+      <summary>Показать текстовую версию</summary>
+      <pre id="plain-preview"></pre>
+    </details>
+  </section>
+</main>
+
+<div class="modal" id="confirm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+  <div class="modal-card">
+    <h3 id="confirm-title">Подтвердите отправку</h3>
+    <p>Письмо уйдёт сразу после нажатия этой кнопки. Проверьте адрес и вложение — это единственное подтверждение для данного получателя.</p>
+    <div class="confirm-box">
+      <div class="confirm-row"><span>Кому</span><b id="confirm-to"></b></div>
+      <div class="confirm-row"><span>Заведение</span><b id="confirm-venue"></b></div>
+      <div class="confirm-row"><span>Тема</span><b id="confirm-subject"></b></div>
+      <div class="confirm-row"><span>От</span><b id="confirm-from"></b></div>
+      <div class="confirm-row"><span>Вложение</span><b id="confirm-attachment"></b></div>
+    </div>
+    <div class="modal-warning">Отправка возможна только один раз для каждого адреса. Повторная отправка блокируется журналом <b>data/sent_log.json</b>.</div>
+    <div class="modal-error" id="confirm-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="confirm-cancel">Отмена</button>
+      <button type="button" class="danger" id="confirm-send">Подтвердить и отправить</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    settings: null,
+    reports: [],
+    recipients: [],
+    current: null,
+    preview: null,
+    previewSeq: 0,
+    daily: { today: 0, limit: 50, remaining: 50 },
+    filter: '',
+    saving: false,
+    sending: false,
+  };
+  let previewTimer = null;
+  let toastTimer = null;
+  let desiredReport = new URLSearchParams(window.location.search).get('report') || '';
+
+  const els = {
+    report: $('report'),
+    reportHint: $('report-hint'),
+    reportModified: $('report-modified'),
+    refreshReports: $('refresh-reports'),
+    stats: $('stats'),
+    subject: $('subject'),
+    letter: $('letter'),
+    boldBtn: $('bold-btn'),
+    bulletBtn: $('bullet-btn'),
+    placeholder: $('placeholder'),
+    insertPlaceholder: $('insert-placeholder'),
+    resetLetter: $('reset-letter'),
+    fromName: $('from-name'),
+    fromEmail: $('from-email'),
+    replyTo: $('reply-to'),
+    bcc: $('bcc'),
+    smtpPreset: $('smtp-preset'),
+    smtpHost: $('smtp-host'),
+    smtpPort: $('smtp-port'),
+    smtpUser: $('smtp-user'),
+    smtpPassword: $('smtp-password'),
+    togglePassword: $('toggle-password'),
+    smtpSsl: $('smtp-ssl'),
+    smtpStarttls: $('smtp-starttls'),
+    rememberPassword: $('remember-password'),
+    passwordHint: $('password-hint'),
+    dailyLimit: $('daily-limit'),
+    testSmtp: $('test-smtp'),
+    resume: $('resume'),
+    resumeFile: $('resume-file'),
+    uploadResume: $('upload-resume'),
+    clearResume: $('clear-resume'),
+    attachResume: $('attach-resume'),
+    resumeState: $('resume-state'),
+    saveSettings: $('save-settings'),
+    saveState: $('save-state'),
+    statePath: $('state-path'),
+    letterPath: $('letter-path'),
+    logPath: $('log-path'),
+    recipientSearch: $('recipient-search'),
+    recipientsCount: $('recipients-count'),
+    recipientsHint: $('recipients-hint'),
+    recipientList: $('recipient-list'),
+    previewTitle: $('preview-title'),
+    previewEmail: $('preview-email'),
+    previewBadges: $('preview-badges'),
+    previewLinks: $('preview-links'),
+    previewNote: $('preview-note'),
+    previewMeta: $('preview-meta'),
+    previewEmpty: $('preview-empty'),
+    iframeWrap: $('iframe-wrap'),
+    previewFrame: $('preview-frame'),
+    previewStatus: $('preview-status'),
+    sendBtn: $('send-btn'),
+    plainPreview: $('plain-preview'),
+    modal: $('confirm-modal'),
+    confirmTo: $('confirm-to'),
+    confirmVenue: $('confirm-venue'),
+    confirmSubject: $('confirm-subject'),
+    confirmFrom: $('confirm-from'),
+    confirmAttachment: $('confirm-attachment'),
+    confirmError: $('confirm-error'),
+    confirmCancel: $('confirm-cancel'),
+    confirmSend: $('confirm-send'),
+    toast: $('toast'),
+  };
+
+  function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[char]));
+  }
+
+  function safeUrl(value) {
+    const text = String(value || '').trim();
+    return /^https?:\/\//i.test(text) ? text : '';
+  }
+
+  function link(url, label) {
+    const safe = safeUrl(url);
+    if (!safe) return '';
+    return `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${esc(label || safe)}</a>`;
+  }
+
+  function toast(message, isError = false) {
+    clearTimeout(toastTimer);
+    els.toast.textContent = message;
+    els.toast.classList.toggle('error', isError);
+    els.toast.classList.add('show');
+    toastTimer = setTimeout(() => els.toast.classList.remove('show'), isError ? 6500 : 4000);
+  }
+
+  async function fetchJson(url, options = {}) {
+    const response = await fetch(url, options);
+    let data = {};
+    try { data = await response.json(); } catch (_error) { /* non-JSON */ }
+    if (!response.ok) throw new Error(data.error || `Ошибка HTTP ${response.status}`);
+    return data;
+  }
+
+  function configFromForm() {
+    return {
+      report: els.report.value,
+      letter: els.letter.value,
+      subject: els.subject.value,
+      from_email: els.fromEmail.value.trim(),
+      from_name: els.fromName.value.trim(),
+      reply_to: els.replyTo.value.trim(),
+      bcc: els.bcc.value.trim(),
+      smtp_host: els.smtpHost.value.trim(),
+      smtp_port: Number(els.smtpPort.value || 587),
+      smtp_user: els.smtpUser.value.trim(),
+      smtp_password: els.smtpPassword.value,
+      smtp_ssl: els.smtpSsl.checked,
+      smtp_starttls: els.smtpStarttls.checked,
+      remember_password: els.rememberPassword.checked,
+      daily_limit: Number(els.dailyLimit.value || 50),
+      resume: els.resume.value.trim(),
+      attach_resume: els.attachResume.checked,
+    };
+  }
+
+  function setFieldValues(settings) {
+    els.fromName.value = settings.from_name || '';
+    els.fromEmail.value = settings.from_email || '';
+    els.replyTo.value = settings.reply_to || '';
+    els.bcc.value = settings.bcc || '';
+    els.smtpHost.value = settings.smtp_host || '';
+    els.smtpPort.value = settings.smtp_port || 587;
+    els.smtpUser.value = settings.smtp_user || '';
+    els.smtpSsl.checked = !!settings.smtp_ssl;
+    els.smtpStarttls.checked = !!settings.smtp_starttls;
+    els.rememberPassword.checked = !!settings.remember_password;
+    els.dailyLimit.value = settings.daily_limit || 50;
+    els.subject.value = settings.subject || '';
+    els.letter.value = settings.letter || '';
+    els.resume.value = settings.resume || '';
+    els.attachResume.checked = !!settings.attach_resume;
+    els.smtpPassword.value = '';
+    updatePasswordHint(settings);
+    updateResumeHint(settings);
+    els.statePath.textContent = settings.state_path || 'data/mailer_settings.json';
+    els.letterPath.textContent = settings.letter_path || 'data/application_email.txt';
+    els.logPath.textContent = settings.sent_log || 'data/sent_log.json';
+  }
+
+  function updatePasswordHint(settings) {
+    if (settings && settings.has_saved_password) {
+      els.smtpPassword.placeholder = 'Сохранён — оставьте пустым';
+      els.passwordHint.textContent = 'Пароль уже сохранён локально. Оставьте поле пустым, чтобы использовать его.';
+    } else if (settings && settings.has_env_password) {
+      els.smtpPassword.placeholder = 'Берётся из .env — можно оставить пустым';
+      els.passwordHint.textContent = 'В .env уже задан SMTP_PASSWORD. Поле можно не заполнять.';
+    } else {
+      els.smtpPassword.placeholder = 'Пароль приложения';
+      els.passwordHint.textContent = 'Пароль не сохраняется, пока не отмечена галочка «Сохранить пароль».';
+    }
+  }
+
+  function updateResumeHint(settings) {
+    const path = settings.resume || '';
+    const exists = !!settings.resume_exists;
+    const attached = !!settings.attach_resume;
+    if (!path) {
+      els.resumeState.textContent = 'не выбран';
+    } else {
+      els.resumeState.textContent = attached ? (exists ? 'прикрепляется' : 'файл не найден') : 'не прикрепляется';
+    }
+    els.resume.title = path;
+  }
+
+  function fillReports(reports) {
+    const current = els.report.value || desiredReport;
+    els.report.innerHTML = '';
+    const items = Array.isArray(reports) ? reports : [];
+    if (!items.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'Отчётов пока нет';
+      els.report.appendChild(option);
+      els.reportHint.textContent = 'Сначала запустите поиск заведений — затем вернитесь сюда.';
+      return;
+    }
+    items.forEach((report) => {
+      const option = document.createElement('option');
+      option.value = report.path;
+      option.textContent = `${report.path} · ${report.modified}`;
+      els.report.appendChild(option);
+    });
+    const wanted = current || desiredReport || items[0].path;
+    if (wanted) {
+      if (Array.from(els.report.options).some((option) => option.value === wanted)) {
+        els.report.value = wanted;
+      } else if (desiredReport) {
+        const option = document.createElement('option');
+        option.value = desiredReport;
+        option.textContent = desiredReport;
+        els.report.appendChild(option);
+        els.report.value = desiredReport;
+      }
+    }
+    if (!els.report.value) els.report.value = items[0].path;
+    const selected = items.find((item) => item.path === els.report.value);
+    els.reportModified.textContent = selected ? selected.modified : '';
+    els.reportHint.textContent = 'Отчёт читается только для выбора получателей. Журнал отправок хранится отдельно.';
+  }
+
+  function reportOption(path) {
+    if (!path) return;
+    desiredReport = path;
+    if (!Array.from(els.report.options).some((option) => option.value === path)) {
+      const option = document.createElement('option');
+      option.value = path;
+      option.textContent = path;
+      els.report.appendChild(option);
+    }
+    els.report.value = path;
+  }
+
+  async function loadSettings() {
+    const data = await fetchJson('/api/send/settings');
+    state.settings = data.settings;
+    state.reports = data.settings.reports || [];
+    setFieldValues(data.settings);
+    fillReports(state.reports);
+    if (desiredReport) reportOption(desiredReport);
+    if (data.settings.default_letter) els.resetLetter.dataset.default = data.settings.default_letter;
+    if (data.settings.default_subject) els.resetLetter.dataset.defaultSubject = data.settings.default_subject;
+    await loadRecipients();
+  }
+
+  function stat(value, label, accent = false) {
+    return `<div class="stat${accent ? ' accent' : ''}"><b>${esc(value)}</b>${esc(label)}</div>`;
+  }
+
+  function renderStats(data) {
+    state.daily = {
+      today: Number(data.sent_today || 0),
+      limit: Number(data.daily_limit || 50),
+      remaining: Number(data.daily_remaining ?? 50),
+    };
+    els.stats.innerHTML = [
+      stat(data.stats.total, 'заведений в отчёте'),
+      stat(data.stats.with_email, 'с e-mail'),
+      stat(data.stats.selected, 'уникальных адресов'),
+      stat(`${data.sent_today} / ${data.daily_limit}`, 'отправлено сегодня', true),
+    ].join('');
+    els.recipientsHint.textContent = data.stats.without_email
+      ? `Без e-mail: ${data.stats.without_email}. Догадок пропущено: ${data.stats.guessed}. Писем сегодня: ${data.sent_today}/${data.daily_limit}.`
+      : `Каждое письмо отправляется отдельно. Сегодня: ${data.sent_today}/${data.daily_limit}.`;
+  }
+
+  function filteredRecipients() {
+    const query = state.filter.trim().toLowerCase();
+    if (!query) return state.recipients;
+    return state.recipients.filter((item) => [
+      item.title, item.email, item.address, item.source_label, item.status_label, item.chain,
+    ].join(' ').toLowerCase().includes(query));
+  }
+
+  function renderRecipients() {
+    const items = filteredRecipients();
+    els.recipientsCount.textContent = `${items.length}${state.filter ? ' найдено' : ''}`;
+    if (!state.recipients.length) {
+      els.recipientList.innerHTML = '<div class="empty">В отчёте нет получателей с e-mail.<br>Запустите поиск или выберите другой отчёт.</div>';
+      return;
+    }
+    if (!items.length) {
+      els.recipientList.innerHTML = '<div class="empty">По этому запросу никого нет.</div>';
+      return;
+    }
+    els.recipientList.innerHTML = items.map((item) => {
+      const active = state.current && state.current.email === item.email;
+      const badges = [];
+      if (item.sent) {
+        badges.push(`<span class="badge green">Отправлено${item.sent_at ? ' · ' + esc(item.sent_at) : ''}</span>`);
+      } else {
+        badges.push('<span class="badge">Не отправлено</span>');
+      }
+      if (item.chain) badges.push(`<span class="badge orange" title="${esc(item.chain)}">Сеть</span>`);
+      if (item.eligible && state.daily.remaining <= 0) {
+        badges.push('<span class="badge red">Лимит дня</span>');
+      }
+      return `
+        <button type="button" class="recipient${active ? ' active' : ''}${item.sent ? ' sent' : ''}" data-email="${esc(item.email)}">
+          <div class="recipient-top">
+            <span class="recipient-title">${esc(item.title)}</span>
+            <span class="badge ${item.chain ? 'orange' : 'blue'}">${esc(item.chain || item.source_label || 'e-mail')}</span>
+          </div>
+          <div class="recipient-email">${esc(item.email)}</div>
+          <div class="recipient-meta">${esc(item.source_label || '')}${item.address ? ' · ' + esc(item.address) : ''}</div>
+          <div class="badges">${badges.join('')}</div>
+        </button>`;
+    }).join('');
+  }
+
+  async function loadRecipients() {
+    const report = els.report.value || desiredReport;
+    if (!report) {
+      state.recipients = [];
+      renderRecipients();
+      return;
+    }
+    els.recipientList.innerHTML = '<div class="empty">Читаю отчёт…</div>';
+    els.recipientsHint.textContent = 'Загружаю получателей…';
+    try {
+      const data = await fetchJson('/api/send/recipients?report=' + encodeURIComponent(report));
+      state.recipients = data.recipients || [];
+      renderStats(data);
+      const stillThere = state.current
+        ? state.recipients.find((item) => item.email === state.current.email)
+        : null;
+      state.current = stillThere || null;
+      renderRecipients();
+      if (state.current) {
+        selectRecipient(state.current, true);
+      } else if (state.recipients.length) {
+        selectRecipient(state.recipients[0], true);
+      } else {
+        clearPreview();
+      }
+    } catch (error) {
+      state.recipients = [];
+      state.current = null;
+      els.stats.innerHTML = '';
+      renderRecipients();
+      clearPreview();
+      els.recipientsHint.textContent = error.message;
+      toast(error.message, true);
+    }
+  }
+
+  function badgeHtml(item) {
+    const badges = [];
+    if (item.sent) {
+      badges.push(`<span class="badge green">Отправлено${item.sent_at ? ' · ' + esc(item.sent_at) : ''}</span>`);
+    } else {
+      badges.push('<span class="badge">Готово к отправке</span>');
+    }
+    if (item.chain) badges.push(`<span class="badge orange">Сеть: ${esc(item.chain)}</span>`);
+    badges.push(`<span class="badge blue">${esc(item.source_label || 'источник')}</span>`);
+    return badges.join('');
+  }
+
+  function renderPreviewHead(item) {
+    els.previewTitle.textContent = item.title || 'Без названия';
+    els.previewEmail.textContent = item.email || '';
+    els.previewBadges.innerHTML = badgeHtml(item);
+    const links = [];
+    if (item.source_url) links.push(link(item.source_url, 'Источник e-mail'));
+    if (item.website) links.push(link(item.website, 'Сайт'));
+    if (item.facebook) links.push(link(item.facebook, 'Facebook'));
+    if (item.maps) links.push(link(item.maps, 'Google Maps'));
+    els.previewLinks.innerHTML = links.join('');
+    const notes = [];
+    if (item.address) notes.push(item.address);
+    if (item.phone) notes.push(item.phone);
+    if (item.chain) notes.push(`Сетевое заведение «${item.chain}» — проверьте, что это локальный адрес, а не общий корпоративный ящик.`);
+    if (item.sent) notes.push(`Уже отправлено ${item.sent_at || ''}. Повторная отправка заблокирована.`);
+    els.previewNote.textContent = notes.join(' · ');
+  }
+
+  function clearPreview() {
+    state.current = null;
+    state.preview = null;
+    els.previewTitle.textContent = 'Выберите получателя';
+    els.previewEmail.textContent = '';
+    els.previewBadges.innerHTML = '';
+    els.previewLinks.innerHTML = '';
+    els.previewNote.textContent = '';
+    els.previewMeta.hidden = true;
+    els.iframeWrap.hidden = true;
+    els.previewEmpty.hidden = false;
+    els.plainPreview.textContent = '';
+    els.previewStatus.textContent = '';
+    els.sendBtn.disabled = true;
+    els.sendBtn.textContent = 'Отправить письмо';
+    renderRecipients();
+  }
+
+  function selectRecipient(item, refresh = true) {
+    state.current = item;
+    renderRecipients();
+    renderPreviewHead(item);
+    els.previewEmpty.hidden = true;
+    els.iframeWrap.hidden = false;
+    els.sendBtn.disabled = item.sent || state.daily.remaining <= 0;
+    els.sendBtn.textContent = item.sent
+      ? 'Уже отправлено'
+      : (state.daily.remaining <= 0 ? 'Дневной лимит достигнут' : 'Отправить письмо');
+    if (refresh) schedulePreview();
+  }
+
+  function schedulePreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => refreshPreview(), 500);
+  }
+
+  async function requestPreview() {
+    if (!state.current) throw new Error('Сначала выберите получателя.');
+    const seq = ++state.previewSeq;
+    const payload = { ...configFromForm(), email: state.current.email };
+    const data = await fetchJson('/api/send/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (seq !== state.previewSeq) return null;
+    state.preview = data.preview;
+    els.previewFrame.srcdoc = data.preview.html || '';
+    els.plainPreview.textContent = data.preview.plain || '';
+    els.previewMeta.hidden = false;
+    els.previewMeta.innerHTML = `
+      <div class="subject"><b>Тема:</b> ${esc(data.preview.subject || '')}</div>
+      <div><b>От:</b> ${esc(data.preview.from || '')}</div>
+      <div><b>Вложение:</b> ${esc((data.preview.attachments || []).join(', ') || 'нет')}</div>`;
+    return data;
+  }
+
+  async function refreshPreview() {
+    if (!state.current) return;
+    els.previewStatus.className = 'preview-status';
+    els.previewStatus.textContent = 'Обновляю предпросмотр…';
+    try {
+      const data = await requestPreview();
+      if (!data) return;
+      els.previewStatus.className = 'preview-status ok';
+      els.previewStatus.textContent = 'HTML-предпросмотр · ссылки кликабельны';
+    } catch (error) {
+      els.previewStatus.className = 'preview-status error';
+      els.previewStatus.textContent = error.message;
+    }
+  }
+
+  function wrapSelection(before, after) {
+    const area = els.letter;
+    const start = area.selectionStart;
+    const end = area.selectionEnd;
+    const selected = area.value.slice(start, end) || 'текст';
+    area.setRangeText(before + selected + after, start, end, 'end');
+    area.focus();
+    schedulePreview();
+  }
+
+  function prefixSelectedLines(prefix) {
+    const area = els.letter;
+    const start = area.selectionStart;
+    const end = area.selectionEnd;
+    const value = area.value;
+    const lineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+    let lineEnd = value.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = value.length;
+    const block = value.slice(lineStart, lineEnd);
+    const lines = block.split('\n');
+    const already = lines.length > 0 && lines.every((line) => /^\s*[-*•]\s+/.test(line));
+    const replacement = lines.map((line) => {
+      if (already) return line.replace(/^\s*[-*•]\s+/, '');
+      return /^\s*[-*•]\s+/.test(line) ? line : '- ' + line;
+    }).join('\n');
+    area.setRangeText(replacement, lineStart, lineEnd, 'end');
+    area.focus();
+    schedulePreview();
+  }
+
+  function insertAtCursor(text) {
+    const area = els.letter;
+    const start = area.selectionStart;
+    const end = area.selectionEnd;
+    area.setRangeText(text, start, end, 'end');
+    area.focus();
+    schedulePreview();
+  }
+
+  const PRESETS = {
+    gmail: { host: 'smtp.gmail.com', port: 465, ssl: true, starttls: false },
+    yandex: { host: 'smtp.yandex.ru', port: 465, ssl: true, starttls: false },
+    mailru: { host: 'smtp.mail.ru', port: 465, ssl: true, starttls: false },
+    outlook: { host: 'smtp-mail.outlook.com', port: 587, ssl: false, starttls: true },
+  };
+
+  function applyPreset(name) {
+    const preset = PRESETS[name];
+    if (!preset) return;
+    els.smtpHost.value = preset.host;
+    els.smtpPort.value = preset.port;
+    els.smtpSsl.checked = preset.ssl;
+    els.smtpStarttls.checked = preset.starttls;
+    if (!els.smtpUser.value.trim()) els.smtpUser.value = els.fromEmail.value.trim();
+    if (!els.fromEmail.value.trim()) els.fromEmail.value = els.smtpUser.value.trim();
+  }
+
+  function setSaveState(text, className = '') {
+    els.saveState.textContent = text;
+    els.saveState.className = 'save-state ' + className;
+  }
+
+  function updateDailyStat() {
+    const dailyStat = els.stats.querySelectorAll('.stat')[3];
+    if (dailyStat) {
+      dailyStat.innerHTML = `<b>${state.daily.today} / ${state.daily.limit}</b>отправлено сегодня`;
+    }
+  }
+
+  async function saveSettings(silent = false) {
+    if (state.saving) return null;
+    state.saving = true;
+    els.saveSettings.disabled = true;
+    if (!silent) setSaveState('Сохраняю…');
+    try {
+      const data = await fetchJson('/api/send/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(configFromForm()),
+      });
+      state.settings = data.settings;
+      state.reports = data.settings.reports || state.reports;
+      updatePasswordHint(data.settings);
+      updateResumeHint(data.settings);
+      if (data.settings.has_saved_password && els.rememberPassword.checked) {
+        els.smtpPassword.value = '';
+      }
+      const newLimit = Number(data.settings.daily_limit || state.daily.limit);
+      if (newLimit !== state.daily.limit) {
+        state.daily.limit = newLimit;
+        state.daily.remaining = Math.max(0, newLimit - state.daily.today);
+        updateDailyStat();
+        renderRecipients();
+        if (state.current) selectRecipient(state.current, false);
+      }
+      setSaveState('Сохранено ' + new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }), 'ok');
+      if (!silent) toast('Письмо и настройки сохранены.');
+      return data;
+    } catch (error) {
+      setSaveState(error.message, 'error');
+      if (!silent) toast(error.message, true);
+      return null;
+    } finally {
+      state.saving = false;
+      els.saveSettings.disabled = false;
+    }
+  }
+
+  async function testSmtp() {
+    els.testSmtp.disabled = true;
+    const previous = els.testSmtp.textContent;
+    els.testSmtp.textContent = 'Проверяю…';
+    try {
+      const data = await fetchJson('/api/send/test-smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(configFromForm()),
+      });
+      toast(data.message || 'SMTP работает.');
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      els.testSmtp.disabled = false;
+      els.testSmtp.textContent = previous;
+    }
+  }
+
+  async function uploadResume(file) {
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    els.uploadResume.disabled = true;
+    try {
+      const data = await fetchJson('/api/send/upload-resume', { method: 'POST', body: form });
+      state.settings = data.settings;
+      els.resume.value = data.resume;
+      els.attachResume.checked = true;
+      updateResumeHint(data.settings);
+      toast(`Резюме загружено: ${data.name}`);
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      els.uploadResume.disabled = false;
+      els.resumeFile.value = '';
+    }
+  }
+
+  function validateBeforeSend() {
+    const config = configFromForm();
+    if (!state.current) throw new Error('Выберите получателя.');
+    if (state.current.sent) throw new Error('Этот адрес уже отправлен.');
+    if (state.daily.remaining <= 0) throw new Error('Дневной лимит отправки уже достигнут.');
+    if (!config.from_email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(config.from_email)) {
+      throw new Error('Укажите корректный e-mail отправителя.');
+    }
+    if (!config.smtp_host) throw new Error('Укажите SMTP-сервер.');
+    if (config.attach_resume && !config.resume.trim()) {
+      throw new Error('Выберите файл резюме или снимите галочку «Прикреплять резюме».');
+    }
+    return config;
+  }
+
+  async function openConfirm() {
+    try {
+      validateBeforeSend();
+      els.sendBtn.disabled = true;
+      els.previewStatus.className = 'preview-status';
+      els.previewStatus.textContent = 'Готовлю письмо к отправке…';
+      const data = await requestPreview();
+      if (!data) throw new Error('Не удалось подготовить предпросмотр.');
+      els.confirmTo.textContent = data.preview.to || state.current.email;
+      els.confirmVenue.textContent = state.current.title || '';
+      els.confirmSubject.textContent = data.preview.subject || '';
+      els.confirmFrom.textContent = data.preview.from || configFromForm().from_email;
+      els.confirmAttachment.textContent = (data.preview.attachments || []).join(', ') || 'без вложения';
+      els.confirmError.textContent = '';
+      els.modal.hidden = false;
+      els.confirmSend.disabled = false;
+      els.confirmCancel.focus();
+      els.previewStatus.className = 'preview-status ok';
+      els.previewStatus.textContent = 'Проверьте письмо и подтвердите отправку.';
+    } catch (error) {
+      els.previewStatus.className = 'preview-status error';
+      els.previewStatus.textContent = error.message;
+      toast(error.message, true);
+      if (state.current) els.sendBtn.disabled = state.current.sent || state.daily.remaining <= 0;
+    }
+  }
+
+  function closeConfirm() {
+    if (state.sending) return;
+    els.modal.hidden = true;
+    els.confirmError.textContent = '';
+    if (state.current) els.sendBtn.disabled = state.current.sent || state.daily.remaining <= 0;
+  }
+
+  async function confirmSend() {
+    if (state.sending || !state.current) return;
+    state.sending = true;
+    const email = state.current.email;
+    els.confirmSend.disabled = true;
+    els.confirmCancel.disabled = true;
+    els.confirmSend.textContent = 'Отправляю…';
+    els.confirmError.textContent = '';
+    try {
+      const payload = { ...configFromForm(), email, confirm: true };
+      const data = await fetchJson('/api/send/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const updated = data.recipient;
+      state.recipients = state.recipients.map((item) => item.email === updated.email ? updated : item);
+      state.daily.today = Number(data.sent_today || state.daily.today + 1);
+      state.daily.remaining = Math.max(0, state.daily.limit - state.daily.today);
+      state.current = updated;
+      els.modal.hidden = true;
+      updateDailyStat();
+      els.recipientsHint.textContent = `Письмо отправлено. Сегодня: ${state.daily.today}/${state.daily.limit}. Каждое следующее письмо требует отдельного подтверждения.`;
+      renderRecipients();
+      selectRecipient(updated, false);
+      toast(data.message || 'Письмо отправлено.');
+      await saveSettings(true);
+    } catch (error) {
+      els.confirmError.textContent = error.message;
+      toast(error.message, true);
+    } finally {
+      state.sending = false;
+      els.confirmSend.disabled = false;
+      els.confirmCancel.disabled = false;
+      els.confirmSend.textContent = 'Подтвердить и отправить';
+    }
+  }
+
+  function bind() {
+    els.report.addEventListener('change', () => {
+      desiredReport = els.report.value;
+      loadRecipients();
+    });
+    els.refreshReports.addEventListener('click', async () => {
+      try {
+        const data = await fetchJson('/api/send/reports');
+        state.reports = data.reports || [];
+        fillReports(state.reports);
+        if (els.report.value) await loadRecipients();
+      } catch (error) { toast(error.message, true); }
+    });
+    els.recipientSearch.addEventListener('input', () => {
+      state.filter = els.recipientSearch.value;
+      renderRecipients();
+    });
+    els.recipientList.addEventListener('click', (event) => {
+      const button = event.target.closest('.recipient');
+      if (!button) return;
+      const item = state.recipients.find((entry) => entry.email === button.dataset.email);
+      if (item) selectRecipient(item, true);
+    });
+    els.boldBtn.addEventListener('click', () => wrapSelection('**', '**'));
+    els.bulletBtn.addEventListener('click', () => prefixSelectedLines('- '));
+    els.insertPlaceholder.addEventListener('click', () => insertAtCursor(els.placeholder.value));
+    els.resetLetter.addEventListener('click', () => {
+      if (!confirm('Сбросить текст письма до шаблона? Несохранённые изменения будут потеряны.')) return;
+      els.letter.value = els.resetLetter.dataset.default || '';
+      els.subject.value = els.resetLetter.dataset.defaultSubject || els.subject.value;
+      schedulePreview();
+    });
+    els.letter.addEventListener('input', schedulePreview);
+    els.subject.addEventListener('input', schedulePreview);
+    [els.fromName, els.fromEmail, els.replyTo, els.bcc].forEach((field) => {
+      field.addEventListener('input', schedulePreview);
+    });
+    els.resume.addEventListener('input', () => {
+      updateResumeHint({
+        resume: els.resume.value,
+        attach_resume: els.attachResume.checked,
+        resume_exists: !!els.resume.value,
+      });
+      schedulePreview();
+    });
+    els.attachResume.addEventListener('change', schedulePreview);
+    els.letter.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
+        event.preventDefault();
+        wrapSelection('**', '**');
+      }
+    });
+    els.saveSettings.addEventListener('click', () => saveSettings(false));
+    els.testSmtp.addEventListener('click', testSmtp);
+    els.togglePassword.addEventListener('click', () => {
+      const visible = els.smtpPassword.type === 'text';
+      els.smtpPassword.type = visible ? 'password' : 'text';
+      els.togglePassword.textContent = visible ? 'Показать' : 'Скрыть';
+    });
+    els.smtpPreset.addEventListener('change', () => applyPreset(els.smtpPreset.value));
+    els.smtpSsl.addEventListener('change', () => {
+      if (els.smtpSsl.checked) {
+        els.smtpStarttls.checked = false;
+        if (Number(els.smtpPort.value) === 587) els.smtpPort.value = 465;
+      }
+    });
+    els.smtpStarttls.addEventListener('change', () => {
+      if (els.smtpStarttls.checked) {
+        els.smtpSsl.checked = false;
+        if (Number(els.smtpPort.value) === 465) els.smtpPort.value = 587;
+      }
+    });
+    els.uploadResume.addEventListener('click', () => els.resumeFile.click());
+    els.resumeFile.addEventListener('change', () => uploadResume(els.resumeFile.files[0]));
+    els.clearResume.addEventListener('click', () => {
+      els.resume.value = '';
+      els.attachResume.checked = false;
+      updateResumeHint({ resume: '', attach_resume: false, resume_exists: false });
+      schedulePreview();
+    });
+    els.attachResume.addEventListener('change', () => {
+      updateResumeHint({
+        resume: els.resume.value,
+        attach_resume: els.attachResume.checked,
+        resume_exists: !!els.resume.value,
+      });
+    });
+    els.sendBtn.addEventListener('click', openConfirm);
+    els.confirmCancel.addEventListener('click', closeConfirm);
+    els.confirmSend.addEventListener('click', confirmSend);
+    els.modal.addEventListener('click', (event) => {
+      if (event.target === els.modal) closeConfirm();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !els.modal.hidden) closeConfirm();
+    });
+  }
+
+  async function init() {
+    bind();
+    try {
+      await loadSettings();
+    } catch (error) {
+      els.recipientList.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+      toast(error.message, true);
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>

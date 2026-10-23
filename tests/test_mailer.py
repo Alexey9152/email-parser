@@ -6,11 +6,15 @@ from email_parser.config import Settings
 from email_parser.exporter import load_results_xlsx, save_results_xlsx
 from email_parser.mailer import (
     DEFAULT_TEMPLATE,
+    body_to_html,
+    body_to_plain,
     build_message,
     describe_source,
     found_note,
+    load_sent_log,
     normalize_statuses,
     select_recipients,
+    send_one,
 )
 from email_parser.models import (
     SOURCE_FB_PAGE,
@@ -56,8 +60,143 @@ def test_message_mentions_restaurant_email_and_facebook_source():
     assert "https://www.facebook.com/CoastalSaltOC" in body
     assert "Alex Los" in body
     assert "June 28, 2027" in body
+    assert "**" not in body
     # No resume was passed, so the letter must not claim one is attached.
     assert "attached my Resume" not in body
+
+
+def test_html_body_renders_bold_bullets_and_clickable_linkedin():
+    body = (
+        "Hello **Manager**,\n\n"
+        "- **Server**\n"
+        "- Cashier\n\n"
+        "LinkedIn: linkedin.com/in/aleksey-los/"
+    )
+    rendered = body_to_html(body)
+
+    assert "<strong>Manager</strong>" in rendered
+    assert "<ul" in rendered
+    assert '<li style="margin:3px 0;"><strong>Server</strong></li>' in rendered
+    assert (
+        '<a href="https://www.linkedin.com/in/aleksey-los/"'
+        in rendered
+    )
+    assert "linkedin.com/in/aleksey-los/" in rendered
+
+    bold_url = body_to_html("**https://example.com/apply**")
+    assert '<strong><a href="https://example.com/apply" target="_blank"' in bold_url
+
+
+def test_plain_body_keeps_bullets_but_strips_markdown_markers():
+    body = "**Hello**\n\n- one\n- two\n\nlinkedin.com/in/aleksey-los/"
+    plain = body_to_plain(body)
+
+    assert "**" not in plain
+    assert "Hello" in plain
+    assert "• one" in plain
+    assert "• two" in plain
+
+
+class _FakeSmtp:
+    def __init__(self):
+        self.messages = []
+        self.quit_called = False
+
+    def send_message(self, message):
+        self.messages.append(message)
+        return {}
+
+    def quit(self):
+        self.quit_called = True
+
+
+def test_send_one_updates_sent_log_and_blocks_duplicate(tmp_path, monkeypatch):
+    server = _FakeSmtp()
+    monkeypatch.setattr("email_parser.mailer.open_smtp", lambda _settings: server)
+    log_path = tmp_path / "sent_log.json"
+    settings = Settings(
+        mail_from="alex@example.com",
+        smtp_host="smtp.example.com",
+        smtp_user="alex@example.com",
+        smtp_password="secret",
+    )
+    row = make_row()
+
+    result = send_one(
+        row,
+        settings=settings,
+        template=DEFAULT_TEMPLATE,
+        subject_template="Work & Travel — {restaurant}",
+        resume_path=None,
+        log_path=log_path,
+        daily_limit=5,
+    )
+
+    assert result["email"] == "manager@coastalsaltoc.com"
+    assert result["sent_today"] == 1
+    assert len(server.messages) == 1
+    assert server.quit_called
+    sent = load_sent_log(log_path)
+    assert sent["manager@coastalsaltoc.com"]["restaurant"] == "Coastal Salt"
+    assert sent["manager@coastalsaltoc.com"]["status"] == "sent"
+
+    try:
+        send_one(
+            row,
+            settings=settings,
+            template=DEFAULT_TEMPLATE,
+            subject_template="Work & Travel — {restaurant}",
+            resume_path=None,
+            log_path=log_path,
+            daily_limit=5,
+        )
+    except RuntimeError as exc:
+        assert "уже отправлено" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("duplicate send must be rejected")
+    assert len(server.messages) == 1
+
+
+def test_send_one_respects_daily_limit(tmp_path, monkeypatch):
+    from email_parser.mailer import save_sent_log
+    from datetime import datetime
+
+    log_path = tmp_path / "sent_log.json"
+    save_sent_log(
+        log_path,
+        {
+            "already@example.com": {
+                "sent_at": datetime.now().isoformat(timespec="seconds"),
+                "status": "sent",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "email_parser.mailer.open_smtp",
+        lambda _settings: (_ for _ in ()).throw(AssertionError("SMTP must not open")),
+    )
+    row = make_row()
+    settings = Settings(
+        mail_from="alex@example.com",
+        smtp_host="smtp.example.com",
+        smtp_user="alex@example.com",
+        smtp_password="secret",
+    )
+
+    try:
+        send_one(
+            row,
+            settings=settings,
+            template=DEFAULT_TEMPLATE,
+            subject_template="Work & Travel — {restaurant}",
+            resume_path=None,
+            log_path=log_path,
+            daily_limit=1,
+        )
+    except RuntimeError as exc:
+        assert "Дневной лимит" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("daily limit must be enforced")
 
 
 def test_message_mentions_website_source():

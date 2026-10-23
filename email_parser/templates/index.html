@@ -156,12 +156,21 @@
   .error { color: #ff8787; font-size: 13px; margin-top: 8px; }
   .leaflet-container { background: #23313d; }
   a { color: var(--accent-2); }
+  header .nav-send {
+    text-decoration: none; font-size: 13px; font-weight: 700; color: #1b1206;
+    background: var(--accent); border-radius: 8px; padding: 8px 13px;
+    margin-left: auto;
+  }
+  .downloads a.send-case {
+    background: #172d44; border-color: #235579; color: #a5d8ff;
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>email-parser</h1>
   <span class="sub">Все заведения общепита на выбранной области → e-mail → Excel</span>
+  <a class="nav-send" href="/send">Письма →</a>
 </header>
 <main>
   <aside id="sidebar">
@@ -530,6 +539,13 @@
           link.textContent = label;
           downloads.appendChild(link);
         });
+        if (data.report_path) {
+          const sendLink = document.createElement('a');
+          sendLink.href = '/send?report=' + encodeURIComponent(data.report_path);
+          sendLink.textContent = 'Отправить письма';
+          sendLink.className = 'send-case';
+          downloads.appendChild(sendLink);
+        }
       } else if (data.state === 'error') {
         statusLine.textContent = 'Ошибка';
         errorBox.textContent = data.error || 'см. журнал';
