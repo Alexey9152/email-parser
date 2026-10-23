@@ -13,6 +13,7 @@ STATUS_SITE = "Found on site"
 STATUS_FB = "Found on FB"
 STATUS_SEARCH = "Found via web search"
 STATUS_JS = "Found via JS render"
+STATUS_OSM = "Found on OpenStreetMap"
 STATUS_GUESS = "Guessed (unverified)"
 STATUS_NOT_FOUND = "Not found"
 
@@ -24,6 +25,7 @@ SOURCE_SITE_JS = "website_js"
 SOURCE_FB_PAGE = "facebook_page"
 SOURCE_FB_SNIPPET = "facebook_snippet"
 SOURCE_SEARCH = "web_search"
+SOURCE_OSM = "osm"
 SOURCE_GUESS = "guess"
 
 SOURCE_LABELS = {
@@ -31,7 +33,8 @@ SOURCE_LABELS = {
     SOURCE_SITE_JS: "сайт (после рендера)",
     SOURCE_FB_PAGE: "Facebook (страница)",
     SOURCE_FB_SNIPPET: "Facebook (поиск)",
-    SOURCE_SEARCH: "поиск Google",
+    SOURCE_SEARCH: "поиск в интернете",
+    SOURCE_OSM: "OpenStreetMap",
     SOURCE_GUESS: "догадка по MX",
 }
 
@@ -41,6 +44,7 @@ SOURCE_STATUS = {
     SOURCE_FB_PAGE: STATUS_FB,
     SOURCE_FB_SNIPPET: STATUS_FB,
     SOURCE_SEARCH: STATUS_SEARCH,
+    SOURCE_OSM: STATUS_OSM,
     SOURCE_GUESS: STATUS_GUESS,
 }
 
@@ -49,6 +53,7 @@ SOURCE_STATUS = {
 SOURCE_BOOST = {
     SOURCE_FB_PAGE: 20,
     SOURCE_FB_SNIPPET: 15,
+    SOURCE_OSM: 12,
     SOURCE_SITE: 10,
     SOURCE_SITE_JS: 8,
     SOURCE_SEARCH: 5,
@@ -240,6 +245,7 @@ class Restaurant:
     category: str = ""
     source_query: str = ""
     facebook_url: str = ""
+    email: str = ""
     rating: float | None = None
     reviews: int | None = None
     price: str = ""
@@ -312,6 +318,8 @@ class ContactResult:
             return self.facebook_url
         if source in {SOURCE_SITE, SOURCE_SITE_JS}:
             return self.website
+        if source == SOURCE_OSM:
+            return self.google_maps_url or self.website or self.facebook_url
         if source == SOURCE_SEARCH:
             return self.google_maps_url or self.website or self.facebook_url
         return ""

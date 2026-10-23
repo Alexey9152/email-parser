@@ -31,6 +31,7 @@ from .models import (
     SOURCE_FB_SNIPPET,
     SOURCE_GUESS,
     SOURCE_LABELS,
+    SOURCE_OSM,
     SOURCE_SEARCH,
     SOURCE_SITE,
     SOURCE_SITE_JS,
@@ -70,7 +71,7 @@ My availability & work schedule:
 Dates: June 28, 2027 – September 1, 2027
 Working Hours: Ready to work 40–60 hours per week (fully available for overtime, flexible shifts, and weekend work).
 
-I have attached my Resume to this email for your review. Please let me know if you need any additional information.
+{resume_note}
 
 Thank you for your time and consideration.
 
@@ -101,6 +102,11 @@ def describe_source(row: ContactResult) -> tuple[str, str]:
     if source == SOURCE_SEARCH:
         return (
             f"in a public online listing for {row.title}",
+            row.google_maps_url or row.website or row.facebook_url,
+        )
+    if source == SOURCE_OSM:
+        return (
+            "in the public OpenStreetMap listing for your business",
             row.google_maps_url or row.website or row.facebook_url,
         )
     if source == SOURCE_GUESS:
@@ -171,6 +177,8 @@ SOURCE_FILTERS = {
     "site": {SOURCE_SITE, SOURCE_SITE_JS},
     "search": {SOURCE_SEARCH},
     "web": {SOURCE_SEARCH},
+    "osm": {SOURCE_OSM},
+    "openstreetmap": {SOURCE_OSM},
     "guess": {SOURCE_GUESS},
 }
 
@@ -268,6 +276,15 @@ def build_message(
     resume_path: Path | None = None,
 ) -> EmailMessage:
     values = template_values(row)
+    has_resume = bool(
+        resume_path and resume_path.exists() and resume_path.is_file()
+    )
+    values["resume_note"] = (
+        "I have attached my Resume to this email for your review. "
+        "Please let me know if you need any additional information."
+        if has_resume
+        else "Please let me know if you need any additional information."
+    )
     body = render_text(template, values)
     subject = render_text(subject_template, values)
     body = body.replace("\r\n", "\n").strip() + "\n"
@@ -289,7 +306,7 @@ def build_message(
     message.set_content(body)
     message.add_alternative(body_to_html(body), subtype="html")
 
-    if resume_path and resume_path.exists() and resume_path.is_file():
+    if has_resume:
         mime_type = mimetypes.guess_type(resume_path.name)[0] or "application/octet-stream"
         maintype, _, subtype = mime_type.partition("/")
         message.add_attachment(
@@ -526,7 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source",
         default="",
-        help="comma-separated source filter: facebook, website, search, guess",
+        help="comma-separated source filter: facebook, website, search, osm, guess",
     )
     parser.add_argument("--log", type=Path, default=None, help="sent log path")
     parser.add_argument("--preview-file", type=Path, default=None, help="preview output path")

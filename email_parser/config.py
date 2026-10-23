@@ -41,7 +41,7 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     """All knobs in one place. Values come from .env unless overridden."""
 
-    maps_provider: str = "playwright"
+    maps_provider: str = "osm"
     apify_token: str = ""
     apify_actor: str = "compass/crawler-google-places"
     apify_search_actor: str = "apify/google-search-scraper"
@@ -51,7 +51,7 @@ class Settings:
     search_delay: float = 4.0
     search_cooldown: float = 120.0
     search_timeout: float = 420.0
-    search_max_queries: int = 400
+    search_max_queries: int = 250
 
     http_timeout: float = 15.0
     http_workers: int = 8
@@ -76,7 +76,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            maps_provider=_env("MAPS_PROVIDER", "playwright").lower(),
+            maps_provider=_env("MAPS_PROVIDER", "osm").lower(),
             apify_token=_env("APIFY_TOKEN"),
             apify_actor=_env("APIFY_ACTOR", "compass/crawler-google-places"),
             apify_search_actor=_env("APIFY_SEARCH_ACTOR", "apify/google-search-scraper"),
@@ -86,7 +86,7 @@ class Settings:
             search_delay=_env_float("SEARCH_DELAY", 4.0),
             search_cooldown=_env_float("SEARCH_COOLDOWN", 120.0),
             search_timeout=_env_float("SEARCH_TIMEOUT", 420.0),
-            search_max_queries=max(10, _env_int("SEARCH_MAX_QUERIES", 400)),
+            search_max_queries=max(10, _env_int("SEARCH_MAX_QUERIES", 250)),
             http_timeout=_env_float("HTTP_TIMEOUT", 15.0),
             http_workers=max(1, _env_int("HTTP_WORKERS", 8)),
             headless=_env_bool("HEADLESS", True),

@@ -8,16 +8,19 @@ from email_parser.mailer import (
     DEFAULT_TEMPLATE,
     build_message,
     describe_source,
+    found_note,
     normalize_statuses,
     select_recipients,
 )
 from email_parser.models import (
     SOURCE_FB_PAGE,
     SOURCE_GUESS,
+    SOURCE_OSM,
     SOURCE_SEARCH,
     SOURCE_SITE,
     STATUS_FB,
     STATUS_GUESS,
+    STATUS_OSM,
     STATUS_SITE,
     ContactResult,
 )
@@ -53,6 +56,8 @@ def test_message_mentions_restaurant_email_and_facebook_source():
     assert "https://www.facebook.com/CoastalSaltOC" in body
     assert "Alex Los" in body
     assert "June 28, 2027" in body
+    # No resume was passed, so the letter must not claim one is attached.
+    assert "attached my Resume" not in body
 
 
 def test_message_mentions_website_source():
@@ -65,6 +70,21 @@ def test_message_mentions_website_source():
     phrase, link = describe_source(row)
     assert phrase == "on your website"
     assert link == "https://coastalsaltoc.com"
+
+
+def test_osm_source_phrase_and_link():
+    row = make_row(
+        emails=["owner@coastalsaltoc.com"],
+        email_sources={"owner@coastalsaltoc.com": SOURCE_OSM},
+        status=STATUS_OSM,
+        google_maps_url="https://www.google.com/maps/search/?api=1&query=Coastal+Salt",
+    )
+    phrase, link = describe_source(row)
+    assert phrase == "in the public OpenStreetMap listing for your business"
+    assert link.startswith("https://www.google.com/maps/search/")
+    note = found_note(row)
+    assert "OpenStreetMap" in note
+    assert "owner@coastalsaltoc.com" in note
 
 
 def test_search_source_phrase_contains_venue_name():
@@ -90,6 +110,8 @@ def test_attachment_is_added(tmp_path):
     attachments = list(message.iter_attachments())
     assert len(attachments) == 1
     assert attachments[0].get_filename() == "Alex_Los_Resume.pdf"
+    body = message.get_body(preferencelist=("plain",)).get_content()
+    assert "attached my Resume" in body
 
 
 def test_select_recipients_skips_guessed_duplicates_and_sent():

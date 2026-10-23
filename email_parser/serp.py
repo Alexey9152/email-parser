@@ -1,13 +1,16 @@
-"""Key-free / cheap web search used for e-mail discovery.
+"""Free-first web search used for e-mail discovery.
 
-Order of preference:
+Order of preference for ``SEARCH_BACKEND=auto``:
 
-* **Apify Google Search Scraper** - uses the same Apify token as the Maps stage,
-  costs about $0.001 per result and returns real URLs, so it also finds the
-  Facebook page that the browser renderer can open afterwards.
-* **SerpAPI** - used first when a key is configured.
-* **DuckDuckGo HTML** - free fallback; throttles hard, so it is cooled down on
-  the first block instead of being hammered.
+* **DDGS** - free metasearch package (DuckDuckGo, Brave, Yahoo, Google, ...).
+  This is the default; it is free and does not need an API key.
+* **DuckDuckGo HTML** - free fallback; throttles hard, so a rate-limit page
+  cools the backend down instead of hammering it.
+
+Paid backends are never used by ``auto``:
+
+* **Apify Google Search Scraper** - only with ``SEARCH_BACKEND=apify``.
+* **SerpAPI** - only with ``SEARCH_BACKEND=serpapi``.
 
 Every backend returns :class:`SearchHit` rows. Backends that support batching
 implement ``search_many`` and are called once for many queries.
@@ -251,6 +254,67 @@ class DuckDuckGoBackend:
         return hits
 
 
+# -------------------------------------------------------------------- DDGS
+class DDGSBackend:
+    """Free metasearch through the ``ddgs`` package (no API key).
+
+    ``ddgs`` aggregates several engines and handles their individual quirks.
+    It can still return no results for an exact venue query, which is normal
+    and must not be treated as a rate limit.
+    """
+
+    name = "ddgs"
+
+    def __init__(self, timeout: float = 12.0):
+        self.timeout = max(5.0, float(timeout))
+
+    def search(self, query: str, num: int = 20) -> list[SearchHit]:
+        try:
+            from ddgs import DDGS
+        except Exception as exc:  # noqa: BLE001 - optional dependency
+            raise BackendBlocked(
+                "ddgs is not installed (run: pip install -r requirements.txt)"
+            ) from exc
+
+        try:
+            with DDGS(timeout=max(5, int(self.timeout))) as ddgs:
+                rows = ddgs.text(
+                    query,
+                    region="us-en",
+                    max_results=max(10, min(30, num)),
+                )
+        except Exception as exc:  # noqa: BLE001 - normalize the package's errors
+            message = str(exc)
+            lowered = message.lower()
+            if "no results" in lowered:
+                return []
+            if any(
+                marker in lowered
+                for marker in (
+                    "rate", "limit", "403", "429", "202", "captcha",
+                    "blocked", "too many", "timed out", "timeout",
+                )
+            ):
+                raise BackendBlocked(f"ddgs: {message[:160]}") from exc
+            log.debug("ddgs failed for %r: %s", query, exc)
+            return []
+
+        return self._to_hits(rows, num)
+
+    @staticmethod
+    def _to_hits(rows: list[dict] | None, num: int = 20) -> list[SearchHit]:
+        hits: list[SearchHit] = []
+        for row in rows or []:
+            title = clean_whitespace(str(row.get("title") or ""))
+            snippet = clean_whitespace(
+                str(row.get("body") or row.get("snippet") or "")
+            )
+            link = str(row.get("href") or row.get("url") or "").strip()
+            if title or snippet or link:
+                hits.append(SearchHit(title=title, snippet=snippet, link=link))
+        return hits[:num]
+
+
 # ----------------------------------------------------------------- SerpAPI
 class SerpApiBackend:
     name = "serpapi"
@@ -306,7 +370,6 @@ class WebSearch:
         self.delay = max(0.0, delay)
         self.cooldown = cooldown
         self._blocked_until: dict[str, float] = {}
-        self._empties: dict[str, int] = {}
         self._last_call = 0.0
 
     @property
@@ -332,12 +395,9 @@ class WebSearch:
                 log.debug("%s backend failed: %s", backend.name, exc)
                 hits = []
             if hits:
-                self._empties[backend.name] = 0
                 return hits, backend.name
-
-            self._empties[backend.name] = self._empties.get(backend.name, 0) + 1
-            if self._empties[backend.name] >= 2:
-                self._cool_down(backend.name, "two empty answers in a row")
+            # An empty answer is normal for a narrow venue query.  Only an
+            # explicit block/rate-limit response cools the backend down.
         return [], ""
 
     def search_many(self, queries: list[str], num: int = 10) -> dict[str, list[SearchHit]]:
@@ -397,22 +457,62 @@ def quote_actor(actor: str) -> str:
 
 
 def build_web_search(settings, http: HttpClient) -> WebSearch:
-    """Pick search backends according to SEARCH_BACKEND / available keys."""
-    ordered: list[SearchBackend] = []
+    """Pick search backends according to SEARCH_BACKEND.
+
+    ``auto`` is deliberately free-only: users must opt into paid backends by
+    name so a forgotten Apify token can never silently spend money again.
+    """
     preference = (settings.search_backend or "auto").lower()
-    if preference in {"auto", "serpapi"} and settings.serpapi_key:
-        ordered.append(SerpApiBackend(settings.serpapi_key))
-    if preference in {"auto", "apify", "google"} and settings.apify_token:
-        ordered.append(
-            ApifySearchBackend(
-                token=settings.apify_token,
-                actor=settings.apify_search_actor,
-                timeout=settings.search_timeout,
+    ordered: list[SearchBackend] = []
+    ddgs_timeout = min(max(5.0, settings.search_timeout), 20.0)
+
+    def free_backends() -> list[SearchBackend]:
+        # DDGS is the primary free engine; the HTML endpoint is a second chance
+        # if the package is missing or every one of its providers is blocked.
+        return [DDGSBackend(timeout=ddgs_timeout), DuckDuckGoBackend(http)]
+
+    if preference in {"none", "off", "disabled"}:
+        return WebSearch([], delay=settings.search_delay, cooldown=settings.search_cooldown)
+
+    if preference in {"apify", "google"}:
+        if settings.apify_token:
+            ordered.append(
+                ApifySearchBackend(
+                    token=settings.apify_token,
+                    actor=settings.apify_search_actor,
+                    timeout=settings.search_timeout,
+                )
             )
+        else:
+            log.warning(
+                "SEARCH_BACKEND=%s but APIFY_TOKEN is empty; using free search",
+                preference,
+            )
+        ordered.extend(free_backends())
+    elif preference == "serpapi":
+        if settings.serpapi_key:
+            ordered.append(SerpApiBackend(settings.serpapi_key))
+        else:
+            log.warning(
+                "SEARCH_BACKEND=serpapi but SERPAPI_KEY is empty; using free search"
+            )
+        ordered.extend(free_backends())
+    elif preference in {"auto", "ddg", "duckduckgo", "ddgs", "free"}:
+        ordered.extend(free_backends())
+        if preference == "auto" and (settings.apify_token or settings.serpapi_key):
+            log.info(
+                "SEARCH_BACKEND=auto uses free search only. "
+                "Set SEARCH_BACKEND=apify or serpapi to opt into paid backends."
+            )
+    else:
+        log.warning(
+            "Unknown SEARCH_BACKEND=%r; falling back to free search", preference
         )
-    if preference in {"auto", "ddg", "duckduckgo"}:
-        ordered.append(DuckDuckGoBackend(http))
-    return WebSearch(ordered, delay=settings.search_delay, cooldown=settings.search_cooldown)
+        ordered.extend(free_backends())
+
+    return WebSearch(
+        ordered, delay=settings.search_delay, cooldown=settings.search_cooldown
+    )
 
 
 def unwrap_ddg_link(href: str) -> str:

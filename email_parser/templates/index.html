@@ -189,11 +189,12 @@
         <input id="limit" type="number" value="100" min="1" max="5000">
       </div>
       <div>
-        <label class="field" for="provider">Источник Maps</label>
+        <label class="field" for="provider">Источник заведений</label>
         <select id="provider">
-          <option value="apify">Apify (рекомендуется)</option>
-          <option value="playwright">Playwright (бесплатно)</option>
-          <option value="outscraper">Outscraper</option>
+          <option value="osm">OpenStreetMap (бесплатно, рекомендуется)</option>
+          <option value="playwright">Google Maps через Playwright (бесплатно)</option>
+          <option value="apify">Apify (платно!)</option>
+          <option value="outscraper">Outscraper (платно!)</option>
         </select>
       </div>
     </div>
@@ -206,7 +207,7 @@
     <label class="field">Что искать</label>
     <div class="checks">
       <label><input type="checkbox" id="use-search" checked>
-        Искать почту в Google (сниппеты Facebook и сайтов)</label>
+        Искать почту в интернете (бесплатные бэкенды)</label>
       <label><input type="checkbox" id="fb-page" checked>
         Открывать страницы Facebook в браузере</label>
       <label><input type="checkbox" id="js">

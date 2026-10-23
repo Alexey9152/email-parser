@@ -11,16 +11,20 @@
 
 ## Как это работает
 
-1. **Google Maps** через Apify (или бесплатный Playwright-скрейпер) собирает заведения.
-   Чтобы обойти лимит Google Maps (~120 результатов на один запрос), один и тот же
-   район опрашивается по **53 категориям** — от «ресторан» и «кофейня» до «мороженое»,
-   «шаурма», «фуд-трак» и «коктейль-бар».
+1. **OpenStreetMap/Overpass** (бесплатно, по умолчанию) собирает заведения внутри
+   выбранной области: рестораны, кафе, бары, пабы, фастфуд, фуд-корты, мороженое,
+   пивные сады, пекарни, дели, кофейни, винные/алкогольные магазины и т.п. Если
+   у объекта в OSM уже есть `email`/`contact:email`, адрес попадает в отчёт сразу.
+   Альтернативы: бесплатный **Playwright**-скрейпер Google Maps или платные
+   Apify/Outscraper — только если явно выбрать их по имени.
 2. **Сайты**: главная и `/contact`, `/about`, `/reservations`, `mailto:`, JSON-LD,
    `og:email`, inline-JS, обфускация (`[at]`, `%40`, `\u0040`). Заведения **без сайта
    не выбрасываются** — именно у них почта чаще всего есть только в Facebook.
-3. **Поиск Google через Apify** (тот же токен): сниппеты `site:facebook.com "<название>"
-   "<город>"` дают ссылку на страницу Facebook и иногда сам адрес. Один прогон актора
-   обрабатывает десятки запросов сразу, поэтому это дешево и быстро.
+3. **Бесплатный поиск** через пакет `ddgs` (DuckDuckGo, Brave, Yahoo, Startpage и
+   другие движки) и HTML-версию DuckDuckGo. Обычный запрос
+   `"<название>" "<город>" facebook email` находит страницу Facebook и иногда сам
+   адрес в сниппете. `SEARCH_BACKEND=auto` **не тратит деньги** и не использует
+   Apify/SerpAPI, даже если их ключи лежат в `.env`.
 4. **Страница Facebook в браузере**: Playwright открывает найденную страницу и достаёт
    e-mail из блока «О себе» даже за стеной логина (это работает не для всех страниц).
 5. **JS-рендер** (флаг `--js`) для тяжёлых React/Vue-сайтов.
@@ -59,7 +63,7 @@ Facebook ищется не только по ссылке в подвале гл
 - экранированные URL (`https:\/\/facebook.com\/...`) и HTML-сущности;
 - страницы `/contact`, `/about`, `/find-us`, `/locations`, `/links` и другие
   контактные разделы (обход не останавливается на первом найденном e-mail);
-- поисковые сниппеты Google через Apify, если на сайте ссылки нет;
+- бесплатные поисковые сниппеты (`ddgs`/DuckDuckGo), если на сайте ссылки нет;
 - страница Facebook открывается в Chromium, раскрывается блок «See more / About»,
   откуда часто виден e-mail менеджера.
 
@@ -94,23 +98,24 @@ python -m playwright install chromium
 Copy-Item .env.example .env
 ```
 
-Впиши в `.env` токен Apify. **Ключи в `.env.example` не кладём** — этот файл
-коммитится, а `.env` в `.gitignore`.
+**Токен Apify не нужен.** После `Copy-Item .env.example .env` там уже
+`MAPS_PROVIDER=osm` и `SEARCH_BACKEND=auto` — это бесплатный путь. Ключи в
+`.env.example` не кладём: файл коммитится, а `.env` в `.gitignore`.
 
 ## Настройка `.env`
 
 | Переменная | Назначение |
 |---|---|
-| `MAPS_PROVIDER` | `apify` (рекомендуется), `outscraper` или `playwright` (бесплатно, медленно и хрупко) |
-| `APIFY_TOKEN` | токен из https://console.apify.com/account/integrations |
+| `MAPS_PROVIDER` | `osm` (бесплатно, по умолчанию), `playwright` (бесплатный Google Maps), `apify` / `outscraper` (платно) |
+| `APIFY_TOKEN` | нужен только для `MAPS_PROVIDER=apify` или `SEARCH_BACKEND=apify` |
 | `APIFY_ACTOR` | по умолчанию `compass/crawler-google-places` |
-| `APIFY_SEARCH_ACTOR` | `apify/google-search-scraper` — поиск Google для Facebook/e-mail |
-| `OUTSCRAPER_API_KEY` | альтернатива Apify |
-| `SEARCH_BACKEND` | `auto` / `apify` / `serpapi` / `ddg` |
-| `SEARCH_MAX_QUERIES` | предохранитель для авто-бюджета поиска (по умолчанию 400 запросов) |
-| `SEARCH_TIMEOUT` | сколько ждать один прогон Apify-поиска, сек (420) |
+| `APIFY_SEARCH_ACTOR` | `apify/google-search-scraper` — платный поиск, только по явному выбору |
+| `OUTSCRAPER_API_KEY` | альтернатива Apify, только по явному выбору |
+| `SEARCH_BACKEND` | `auto` / `ddgs` / `ddg` / `apify` / `serpapi` / `none` |
+| `SEARCH_MAX_QUERIES` | предохранитель авто-бюджета поиска (по умолчанию 250 запросов) |
+| `SEARCH_TIMEOUT` | таймаут одного платного Apify-поиска и OSM-запроса, сек |
 | `SEARCH_DELAY` / `SEARCH_COOLDOWN` | пауза между запросами / отдых после блокировки (для DDG) |
-| `SERPAPI_KEY` | необязателен; если есть, используется первым |
+| `SERPAPI_KEY` | нужен только для `SEARCH_BACKEND=serpapi` (платно) |
 | `HTTP_TIMEOUT` / `HTTP_WORKERS` | сеть и параллельность обхода сайтов |
 | `HEADLESS` | `0` — показывать окно браузера (отладка) |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP-сервер и порт (587 для STARTTLS, 465 для SSL) |
@@ -120,9 +125,21 @@ Copy-Item .env.example .env
 | `MAIL_REPLY_TO` / `MAIL_BCC` | необязательные Reply-To и копия себе |
 | `MAIL_DELAY` / `MAIL_DAILY_LIMIT` | пауза между письмами (30 с) и лимит в день (50) |
 
-При `SEARCH_BACKEND=auto` порядок такой: SerpAPI (если ключ) → **Apify Google**
-(если токен) → DuckDuckGo. DuckDuckGo и прямой Google с обычного IP сейчас часто
-отдают капчу, поэтому основной надёжный путь — Apify.
+`SEARCH_BACKEND=auto` — это **только бесплатные** `ddgs` + DuckDuckGo HTML.
+Платные бэкенды включаются лишь явно:
+
+```powershell
+# бесплатно (по умолчанию)
+python main.py -q "Ocean City, MD" --all-food --limit 300 --provider osm
+
+# платно и осознанно
+python main.py -q "Ocean City, MD" --all-food --limit 300 --provider apify --search-provider apify
+```
+
+OSM-провайдер сначала геокодирует город через Nominatim, затем делает два запроса
+Overpass на плитку области (еда/напитки и продуктовые магазины), повторяет запрос
+при 502/504 и переключается на второй публичный сервер Overpass. Большие области
+автоматически делятся на плитки.
 
 ## UI с выбором области на карте
 
@@ -150,13 +167,13 @@ Copy-Item .env.example .env
 ## CLI
 
 ```powershell
-# весь общепит города
-python main.py -q "Ocean City, MD" --all-food --limit 300 --provider apify -v
+# весь общепит города: бесплатный OpenStreetMap
+python main.py -q "Ocean City, MD" --all-food --limit 300 --provider osm -v
 
 # конкретные категории
 python main.py -q "Ocean City, MD" --categories "ice cream,shawarma,cocktail bar" --limit 100
 
-# прямоугольник на карте: south,west,north,east
+# прямоугольник на карте: south,west,north,east (для OSM самый точный вариант)
 python main.py --bbox "38.32,-75.10,38.40,-75.03" --all-food --limit 300
 
 # только собрать базу
@@ -165,8 +182,12 @@ python main.py -q "cafes in Austin, TX" --limit 200 --stage maps
 # только почты по готовому списку + JS + подбор
 python main.py --stage emails --input data/restaurants_list.json --js --guess -v
 
-# бесплатный скрейпер Maps вместо Apify
+# бесплатный Google Maps вместо OSM (может упереться в captcha)
 python main.py -q "pizza in Boston, MA" --limit 20 --provider playwright --headed
+
+# бесплатный поиск по умолчанию; явный выбор для платного Apify
+python main.py -q "Ocean City, MD" --limit 100 --search-provider ddgs
+python main.py -q "Ocean City, MD" --limit 100 --search-provider apify
 
 # превью писем по готовой таблице (ничего не отправляется)
 python main.py send --input data/final_contacts.xlsx
@@ -187,14 +208,14 @@ python main.py --list-categories
 | `--categories "a,b"` | категории или группы (`restaurants`, `drinks`, `sweets`, `street`, `cuisines`) |
 | `--bbox "s,w,n,e"` | прямоугольник вместо текстового города |
 | `--limit` | максимум заведений в отчёте |
-| `--provider` | `apify` / `playwright` / `outscraper` |
+| `--provider` | `osm` (бесплатно) / `playwright` (бесплатно) / `apify` / `outscraper` (платно) |
 | `--stage` | `all` / `maps` / `emails` |
 | `--only-with-website` | старое поведение: выбросить заведения без сайта |
 | `--no-fb-page` | не открывать Facebook в браузере (по умолчанию открывается) |
 | `--fb-limit` | сколько страниц Facebook максимум открыть (60) |
-| `--no-search` | не искать в Google/Facebook |
-| `--search-limit` | максимум поисковых запросов (0 = 2 для заведения без адреса, 1 для `info@`, но не больше `SEARCH_MAX_QUERIES`) |
-| `--search-provider` | `auto` / `apify` / `serpapi` / `ddg` / `none` |
+| `--no-search` | не искать в интернете/Facebook |
+| `--search-limit` | максимум поисковых запросов (0 = 1 запрос для заведения без адреса или с общим `info@`, но не больше `SEARCH_MAX_QUERIES`) |
+| `--search-provider` | `auto` / `ddgs` / `ddg` / `apify` / `serpapi` / `none` |
 | `--js` | рендерить сайты без почты в Chromium |
 | `--guess` | добавить `info@`/`contact@` после проверки MX |
 | `--headed` | показать браузер |
@@ -210,7 +231,7 @@ python main.py --list-categories
 
 - ссылки на сайт, Facebook и Google Maps **кликабельны**;
 - основной e-mail — ссылка `mailto:`;
-- «Откуда основной e-mail» показывает, выбран ли адрес с сайта, Facebook или поиска;
+- «Откуда основной e-mail» показывает, выбран ли адрес с сайта, Facebook, OpenStreetMap или поиска;
 - «Источники e-mail» перечисляет **все** найденные адреса и их происхождение;
 - включены фильтры по столбцам и закреплена шапка;
 - статус подсвечен: зелёный — найден, жёлтый — догадка, красный — не найден.
@@ -227,6 +248,7 @@ python main.py --list-categories
 | `Найден на Facebook` | сниппет или страница Facebook |
 | `Найден в поиске` | сниппет обычной выдачи |
 | `Найден после рендера` | сайт отрендерен в Chromium |
+| `Найден в OpenStreetMap` | адрес указан в тегах OSM (`email` / `contact:email`) |
 | `Предположение (не проверено)` | `info@`/`contact@` по MX, **проверять вручную** |
 | `Не найден` | адреса нет в доступных источниках |
 
@@ -276,30 +298,44 @@ python main.py send --input data/final_contacts.xlsx --resume data/Alex_Los_Resu
 
 ## Сколько это стоит
 
-- **Apify Google Maps**: зависит от числа заведений и категорий; лимит делится между
-  запросами. Для района на 300 заведений это заметная, но предсказуемая сумма —
-  смотри тариф актора `compass/crawler-google-places`.
-- **Apify Google Search**: около **$0.00105 за результат**. Один запрос — обычно
-  до 10 результатов, то есть ~$0.01; 20 запросов в живом прогоне дали 167 результатов
-  и ~$0.18. Авто-бюджет — 2 запроса на заведение без почты и 1 запрос на
-  заведение, где найден только общий `info@` (чтобы поискать менеджера).
-- **Playwright** (Maps/сайты) — бесплатно, но медленнее и может упираться в капчу.
+**По умолчанию — 0 ₽ / $0.** Основной путь:
 
-Управлять расходом: `--limit`, `--search-limit`, `--fb-limit`, `--no-search`,
-`--no-fb-page`.
+- **OpenStreetMap/Overpass + Nominatim** — бесплатно, без ключа.
+- **`ddgs` + DuckDuckGo HTML** — бесплатно, без ключа; могут throttling-ить,
+  поэтому между запросами стоит пауза, а при 202/429 бэкенд временно отключается.
+- **Playwright** (сайты, Facebook, Google Maps) — бесплатно, но медленнее и может
+  упираться в капчу.
+
+Платные бэкенды запускаются **только** при явном выборе:
+
+- **Apify Google Maps** — `MAPS_PROVIDER=apify` / `--provider apify`.
+- **Apify Google Search** — `SEARCH_BACKEND=apify` / `--search-provider apify`,
+  около **$0.00105 за результат** (один запрос обычно до 10 результатов).
+- **Outscraper** — `MAPS_PROVIDER=outscraper`.
+- **SerpAPI** — `SEARCH_BACKEND=serpapi`.
+
+`SEARCH_BACKEND=auto` **никогда** не выбирает платный бэкенд, даже если
+`APIFY_TOKEN` или `SERPAPI_KEY` заполнены. Управлять объёмом:
+`--limit`, `--search-limit`, `--fb-limit`, `--no-search`, `--no-fb-page`.
+Перед большим прогоном проверь `.env`: `MAPS_PROVIDER=osm`, `SEARCH_BACKEND=auto`.
 
 ## Ограничения
 
 - Facebook часто требует логин: часть страниц не отдаёт контакты даже браузеру.
   Тогда в отчёте останется ссылка на страницу для ручной проверки.
-- Google Maps отдаёт максимум ~120 результатов на запрос, поэтому «весь город»
-  собирается категориями; очень большие города имеет смысл бить на районы (`--bbox`).
+- OpenStreetMap покрывает меньше заведений, чем Google Maps, и не у всех есть сайт
+  или телефон. Зато это бесплатно и стабильно; для более полного охвата можно
+  сравнить с `--provider playwright` или выбрать конкретный район через `--bbox`.
+- Overpass иногда отвечает 502/504 или таймаутом. Провайдер повторяет запрос,
+  переключается на второй сервер и делит большие области на плитки; при полной
+  недоступности OSM лучше повторить позже или взять `--provider playwright`.
+- `ddgs` — метапоиск: выдача может быть неполной, а отдельные движки (Brave,
+  Google, Mojeek) отдают 403/429 с домашнего IP. Это не ошибка пайплайна;
+  `auto` продолжает работать на других бесплатных движках и HTML-DuckDuckGo.
 - Одинаковые названия в разных районах не всегда различимы, если у заведения нет
   `place_id`; дедуп идёт по `place_id`, домену сайта или паре «название + адрес».
 - `Предположение (не проверено)` — это гипотеза, а не найденный адрес.
-- Прямой скрейпинг выдачи Google/DDG с домашнего IP нестабилен — для объёмов
-  используй Apify-поиск.
-- Google Sheets (TODO 2.4.3) не подключён; экспорт — Excel/CSV/JSON.
+- Google Sheets не подключён; экспорт — Excel/CSV/JSON.
 
 ## Структура
 
@@ -318,7 +354,7 @@ email_parser/
   extractors.py            # mailto, regex, JSON-LD, JS-эскейпы, Facebook
   website.py               # обход сайта и contact-страниц
   playwright_site.py       # JS-рендер и страницы Facebook
-  serp.py                  # Apify Google, SerpAPI, DDG, батчи
+  serp.py                  # бесплатные DDGS/DDG + опциональные Apify/SerpAPI
   facebook.py              # план запросов, разбор выдачи, фильтр адресов
   guess.py                 # info@/contact@ + MX-проверка
   progress.py              # потокобезопасные счётчики для UI
@@ -329,12 +365,13 @@ email_parser/
   templates/index.html     # Leaflet UI
   maps/
     base.py                # протокол провайдера
-    playwright_provider.py # бесплатный скрейпер Maps
+    osm.py                 # бесплатный OpenStreetMap/Overpass + Nominatim
+    playwright_provider.py # бесплатный скрейпер Google Maps
     apify.py               # Apify Maps + customGeolocation (полигон)
     outscraper.py
 templates/
   application_email.txt    # текст письма, редактируется без кода
-tests/                     # 70 тестов без сети
+tests/                     # тесты без сети
 ```
 
 ## Тесты

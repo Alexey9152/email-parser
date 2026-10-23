@@ -218,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("ddgs").setLevel(logging.WARNING)
 
     app = create_app()
     url = f"http://{args.host}:{args.port}/"

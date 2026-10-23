@@ -20,7 +20,7 @@ from .exporter import (
     save_results_json,
     save_results_xlsx,
 )
-from .extractors import clean_facebook_url
+from .extractors import clean_facebook_url, extract_emails
 from .facebook import SocialEmailFinder, filter_email_list
 from .guess import EmailGuesser
 from .http_client import HttpClient
@@ -29,6 +29,7 @@ from .models import (
     SOURCE_FB_PAGE,
     SOURCE_FB_SNIPPET,
     SOURCE_GUESS,
+    SOURCE_OSM,
     SOURCE_SEARCH,
     SOURCE_SITE,
     SOURCE_SITE_JS,
@@ -72,6 +73,7 @@ class RunStats:
     from_facebook: int = 0
     from_search: int = 0
     from_js: int = 0
+    from_osm: int = 0
     from_guess: int = 0
     not_found: int = 0
     errors: int = 0
@@ -239,6 +241,7 @@ def _source_note(source: str) -> str:
         SOURCE_FB_PAGE: "facebook (page render)",
         SOURCE_FB_SNIPPET: "facebook (search snippet)",
         SOURCE_SEARCH: "web search",
+        SOURCE_OSM: "OpenStreetMap",
         SOURCE_GUESS: "pattern guess (MX ok)",
     }.get(source, "")
 
@@ -248,32 +251,91 @@ def _needs_better_email(row: ContactResult) -> bool:
     return not row.emails or not any(is_hiring_email(email) for email in row.emails)
 
 
-def _facebook_page_matches(page_url: str, emails: list[str]) -> bool:
-    """Check that the local parts look like they belong to *this* page.
+def _compact(value: str) -> str:
+    """Keep only letters/digits so ``Longboard Cafe`` matches ``longboardcafe``."""
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+# Consumer/ISP mailboxes are usual for small venues.  A title match in the
+# local part is trustworthy there; on a corporate domain it is not enough
+# (e.g. facebook.com/TheBonfireSXM renders thebonfire@siriusxm.com, which is a
+# radio show, not the restaurant at that address).
+CONSUMER_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "mac.com", "proton.me", "protonmail.com", "mail.com", "gmx.com", "gmx.net",
+    "zoho.com", "yandex.com", "yandex.ru", "comcast.net", "verizon.net",
+    "att.net", "sbcglobal.net", "cox.net", "charter.net",
+}
+
+
+def _facebook_page_matches(
+    page_url: str, emails: list[str], *, website: str = "", title: str = ""
+) -> bool:
+    """Check that the addresses belong to the venue behind *this* page.
 
     Facebook login interstitials and redirects sometimes render another page;
-    if the slug/title tokens are nowhere in the addresses, the addresses are
-    dropped instead of being written to the report.
+    the rendered e-mail must be tied to the page slug, the venue title, or the
+    venue website.  The website check is important for pages such as
+    ``facebook.com/longboardcafemd`` whose e-mail is
+    ``info@longboardcafe.net``: the city suffix is not part of the domain.
+
+    Numeric page ids carry no name hints, so they are accepted as before.
     """
     slug = urlsplit(page_url or "").path.strip("/").split("/")[0].lower()
     if not slug or slug.isdigit():
-        # Numeric page ids carry no name hints at all.
         return True
-    tokens = [token for token in re.split(r"[^a-z0-9]+", slug) if len(token) >= 3]
-    if not tokens:
-        return True
-    joined = " ".join(emails).lower()
-    return any(token in joined for token in tokens)
+    emails = [email.lower() for email in emails if "@" in email]
 
+    # The strongest signal: the address lives on the venue's own website.
+    site_domain = registrable_domain(website)
+    strong: set[str] = set()
+    weak: set[str] = set()
+    slug_compact = _compact(slug)
+    if len(slug_compact) >= 5:
+        strong.add(slug_compact)
+    elif len(slug_compact) >= 3:
+        weak.add(slug_compact)
+    # facebook.com/longboardcafemd -> longboardcafe
+    for suffix in (
+        "md", "va", "de", "nj", "pa", "dc", "ny", "nc", "sc", "ga", "fl",
+        "tx", "ca", "oc",
+    ):
+        if slug_compact.endswith(suffix):
+            stem = slug_compact[: -len(suffix)]
+            if len(stem) >= 5:
+                strong.add(stem)
+            elif len(stem) >= 4:
+                weak.add(stem)
+    title_compact = _compact(title)
+    if len(title_compact) >= 5:
+        strong.add(title_compact)
+    for token in re.split(r"[^a-z0-9]+", title.lower()):
+        if len(token) >= 5:
+            strong.add(token)
+        elif len(token) >= 4:
+            weak.add(token)
+    candidates = strong | weak
 
-def _facebook_email_query(title: str, city: str) -> list[tuple[str, str]]:
-    location = f' "{clean_whitespace(city)}"' if city else ""
-    return [
-        (
-            "facebook",
-            f'site:facebook.com "{clean_whitespace(title)}"{location} email',
-        )
-    ]
+    for email in emails:
+        local, _, domain = email.partition("@")
+        domain = domain.strip().strip(".")
+        if not domain:
+            continue
+        email_domain = registrable_domain("https://" + domain)
+        if site_domain and email_domain == site_domain:
+            return True
+        local_compact = _compact(local)
+        domain_compact = _compact(domain)
+        if domain in CONSUMER_EMAIL_DOMAINS and any(
+            candidate in local_compact for candidate in candidates
+        ):
+            return True
+        # A brand domain (info@longboardcafe.net) is a strong signal too, while
+        # a corporate domain that merely shares a generic word is not.
+        if any(candidate in domain_compact for candidate in strong):
+            return True
+    return False
 
 
 def _default_source(row: ContactResult) -> str:
@@ -305,6 +367,12 @@ def enrich_restaurants(
     stats.without_site = sum(1 for restaurant in restaurants if not restaurant.website)
     started = time.time()
     results: list[ContactResult] = [_empty_result(r) for r in restaurants]
+    # OpenStreetMap tags often contain the venue's own contact address.  Use it
+    # before crawling/searching so a missing website does not hide a valid inbox.
+    for index, restaurant in enumerate(restaurants):
+        osm_emails = extract_emails(restaurant.email)
+        if osm_emails:
+            _add_emails(results[index], osm_emails, SOURCE_OSM)
     workers = max(1, workers or settings.http_workers)
 
     # ---- websites --------------------------------------------------------
@@ -394,7 +462,7 @@ def enrich_restaurants(
             if not finder.enabled:
                 log.info("No search backend available - Facebook/web lookup skipped")
             else:
-                auto_budget = 2 * len(pending) + len(weak)
+                auto_budget = len(pending) + len(weak)
                 budget = (
                     search_limit
                     if search_limit > 0
@@ -405,7 +473,7 @@ def enrich_restaurants(
                 for index in pending:
                     if used >= budget:
                         break
-                    remaining = min(2, budget - used)
+                    remaining = min(1, budget - used)
                     plan = finder.plan(
                         restaurants[index].title,
                         city,
@@ -420,7 +488,13 @@ def enrich_restaurants(
                 for index in weak:
                     if used >= budget:
                         break
-                    plan = _facebook_email_query(restaurants[index].title, city)
+                    plan = finder.plan(
+                        restaurants[index].title,
+                        city,
+                        restaurants[index].phone,
+                        results[index].facebook_url,
+                        max_queries=1,
+                    )
                     plans.append((index, plan))
                     used += len(plan)
 
@@ -431,7 +505,7 @@ def enrich_restaurants(
                     progress,
                     stage="search",
                     message=(
-                        f"Google ищет адреса: {len(all_queries)} запрос(ов) "
+                        f"Ищем адреса в поиске: {len(all_queries)} запрос(ов) "
                         f"для {len(plans)} заведений"
                     ),
                     searches_total=len(all_queries),
@@ -458,7 +532,7 @@ def enrich_restaurants(
                         restaurants[index].title,
                         plan,
                         hits_by_query,
-                        backend="google",
+                        backend="search",
                         facebook_url=row.facebook_url,
                         restaurant_website=restaurants[index].website,
                     )
@@ -512,7 +586,22 @@ def enrich_restaurants(
                         log.info("JS render for %d venue(s)", len(js_queue))
                     for done, index in enumerate(js_queue, start=1):
                         row = results[index]
-                        rendered = renderer.analyze(restaurants[index].website)
+                        try:
+                            rendered = renderer.analyze(restaurants[index].website)
+                        except Exception as exc:  # noqa: BLE001 - one page must not abort the batch
+                            stats.errors += 1
+                            row.note = f"JS render error: {exc}"[:200]
+                            log.warning(
+                                "JS render failed for %s: %s",
+                                restaurants[index].website,
+                                exc,
+                            )
+                            _progress_update(
+                                progress,
+                                js_done=done,
+                                emails_found=_count_found(results),
+                            )
+                            continue
                         if rendered.emails:
                             _add_emails(row, rendered.emails, SOURCE_SITE_JS)
                         if rendered.facebook_url and not row.facebook_url:
@@ -566,33 +655,45 @@ def enrich_restaurants(
                     for done, index in enumerate(fb_queue, start=1):
                         row = results[index]
                         page_url = row.facebook_url
-                        rendered = renderer.analyze(page_url, follow_contact=False)
-                        # Facebook often shows a login interstitial on the first
-                        # hit; give a useful page one retry before giving up.
-                        if (rendered.blocked or not rendered.emails) and _needs_better_email(row):
-                            time.sleep(1.5)
-                            retry = renderer.analyze(page_url, follow_contact=False)
-                            if retry.emails and len(retry.emails) >= len(rendered.emails):
-                                rendered = retry
-                            elif not rendered.emails:
-                                rendered = retry
-                        emails = filter_email_list(rendered.emails)
-                        if emails and not _facebook_page_matches(page_url, emails):
-                            row.note = (
-                                "Facebook page e-mail ignored: page identity unverified"
+                        try:
+                            rendered = renderer.analyze(page_url, follow_contact=False)
+                            # Facebook often shows a login interstitial on the first
+                            # hit; give a useful page one retry before giving up.
+                            if (rendered.blocked or not rendered.emails) and _needs_better_email(row):
+                                time.sleep(1.5)
+                                retry = renderer.analyze(page_url, follow_contact=False)
+                                if retry.emails and len(retry.emails) >= len(rendered.emails):
+                                    rendered = retry
+                                elif not rendered.emails:
+                                    rendered = retry
+                            emails = filter_email_list(rendered.emails)
+                            if emails and not _facebook_page_matches(
+                                page_url,
+                                emails,
+                                website=restaurants[index].website,
+                                title=restaurants[index].title,
+                            ):
+                                row.note = (
+                                    "Facebook page e-mail ignored: page identity unverified"
+                                )
+                                emails = []
+                            added = _add_emails(row, emails, SOURCE_FB_PAGE)
+                            if added:
+                                log.info(
+                                    "  FB page hit: %s -> %s",
+                                    restaurants[index].title[:40],
+                                    row.primary_email,
+                                )
+                            elif rendered.blocked:
+                                row.note = row.note or "Facebook page requires login"
+                            elif not emails:
+                                row.note = row.note or "Facebook page has no public e-mail"
+                        except Exception as exc:  # noqa: BLE001 - one page must not abort the batch
+                            stats.errors += 1
+                            row.note = f"Facebook render error: {exc}"[:200]
+                            log.warning(
+                                "Facebook render failed for %s: %s", page_url, exc
                             )
-                            emails = []
-                        added = _add_emails(row, emails, SOURCE_FB_PAGE)
-                        if added:
-                            log.info(
-                                "  FB page hit: %s -> %s",
-                                restaurants[index].title[:40],
-                                row.primary_email,
-                            )
-                        elif rendered.blocked:
-                            row.note = row.note or "Facebook page requires login"
-                        elif not emails:
-                            row.note = row.note or "Facebook page has no public e-mail"
                         _progress_update(
                             progress,
                             fb_done=done,
@@ -636,6 +737,18 @@ def enrich_restaurants(
         if guessed:
             log.info("Guessed %d unverified address(es) from MX records", guessed)
 
+    # A transient website failure is no longer the headline once another
+    # stage (Facebook, OSM, search) produced a usable address.
+    for row in results:
+        if not row.primary_email:
+            continue
+        if (
+            row.note in {"unreachable", "website blocks bots"}
+            or row.note.startswith("site error:")
+            or row.note.startswith("нет сайта")
+        ):
+            row.note = ""
+
     # ---- final ranking / statuses / stats --------------------------------
     for row in results:
         row.emails = unique(row.emails)
@@ -661,6 +774,9 @@ def enrich_restaurants(
     )
     stats.from_js = sum(
         1 for row in results if row.primary_email_source == SOURCE_SITE_JS
+    )
+    stats.from_osm = sum(
+        1 for row in results if row.primary_email_source == SOURCE_OSM
     )
     stats.from_guess = sum(
         1 for row in results if row.primary_email_source == SOURCE_GUESS
@@ -792,14 +908,15 @@ def run(
         emails_found=enrich_stats.with_email,
     )
     log.info(
-        "Done in %.1fs: %d with e-mail (site %d, fb %d, search %d, js %d, guessed %d), "
-        "%d not found, %d errors",
+        "Done in %.1fs: %d with e-mail (site %d, fb %d, search %d, js %d, "
+        "osm %d, guessed %d), %d not found, %d errors",
         enrich_stats.duration,
         enrich_stats.with_email,
         enrich_stats.from_site,
         enrich_stats.from_facebook,
         enrich_stats.from_search,
         enrich_stats.from_js,
+        enrich_stats.from_osm,
         enrich_stats.from_guess,
         enrich_stats.not_found,
         enrich_stats.errors,

@@ -16,12 +16,19 @@ def test_filter_email_list_drops_directories_but_keeps_venue():
     assert filter_email_list(emails) == ["info@coastalsaltoc.com"]
 
 
-def test_plan_starts_with_facebook_and_respects_budget():
+def test_plan_starts_with_free_search_friendly_facebook_query():
     plan = SocialEmailFinder.plan("Coastal Salt", "Ocean City, MD", max_queries=2)
     assert len(plan) == 2
     assert plan[0][0] == "facebook"
-    assert "site:facebook.com" in plan[0][1]
+    # Free engines often ignore site:, so the first query is a phrase query.
+    assert "site:facebook.com" not in plan[0][1]
+    assert "facebook email" in plan[0][1]
     assert '"Ocean City, MD"' in plan[0][1]
+
+
+def test_plan_keeps_precise_site_query_later():
+    plan = SocialEmailFinder.plan("Coastal Salt", "Ocean City, MD", max_queries=4)
+    assert any("site:facebook.com" in query for _kind, query in plan)
 
 
 def test_plan_adds_phone_query():

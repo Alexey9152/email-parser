@@ -18,12 +18,12 @@ log = logging.getLogger("email_parser")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="email-parser",
-        description="Collect food & drink venues from Google Maps and find their e-mails.",
+        description="Collect food & drink venues and find their e-mails.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             '  python main.py -q "restaurants in Ocean City, MD" --limit 40\n'
-            '  python main.py -q "Ocean City, MD" --all-food --limit 300 --provider apify\n'
+            '  python main.py -q "Ocean City, MD" --all-food --limit 300 --provider osm\n'
             '  python main.py --bbox "38.32,-75.10,38.40,-75.03" --all-food --limit 300\n'
             '  python main.py -q "Austin, TX" --categories "ice cream,shawarma,cocktail bar"\n'
             "  python main.py --stage emails --input data/restaurants_list.json --js\n"
@@ -48,9 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=("playwright", "apify", "outscraper"),
+        choices=("osm", "playwright", "apify", "outscraper"),
         default=None,
-        help="Google Maps backend (default: MAPS_PROVIDER from .env)",
+        help=(
+            "venue source (default: MAPS_PROVIDER from .env; osm = free "
+            "OpenStreetMap, playwright = free Google Maps, apify/outscraper = paid)"
+        ),
     )
     parser.add_argument("--input", type=Path, default=None, help="restaurants_list.json for --stage emails")
     parser.add_argument("--out-dir", type=Path, default=None, help="output directory (default: ./data)")
@@ -97,13 +100,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-limit",
         type=int,
         default=0,
-        help="max search queries per run (default: 0 = 2 per venue, capped by SEARCH_MAX_QUERIES)",
+        help="max search queries per run (default: 0 = 1 per venue, capped by SEARCH_MAX_QUERIES)",
     )
     parser.add_argument(
         "--search-provider",
-        choices=("auto", "apify", "serpapi", "ddg", "none"),
+        choices=("auto", "ddgs", "ddg", "apify", "serpapi", "none"),
         default=None,
-        help="web search backend (auto = Apify Google, then DDG)",
+        help=(
+            "web search backend (auto = free DDGS + DuckDuckGo; "
+            "apify/serpapi only when explicitly selected)"
+        ),
     )
     parser.add_argument("--js", action="store_true", help="render failed sites in headless Chromium (slow)")
     parser.add_argument(
@@ -156,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
     # httpx logs full request URLs, and Apify passes its token as a query param.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # ``ddgs`` logs every individual engine request at INFO, which drowns out
+    # our per-venue progress.  Keep its warnings and errors only.
+    logging.getLogger("ddgs").setLevel(logging.WARNING)
 
     if args.list_categories:
         _print_categories()
@@ -231,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  on Facebook     : {stats.from_facebook}")
     print(f"  web search      : {stats.from_search}")
     print(f"  JS render       : {stats.from_js}")
+    print(f"  OpenStreetMap   : {stats.from_osm}")
     print(f"  guessed         : {stats.from_guess}")
     print(f"  not found       : {stats.not_found}")
     print(f"Excel: {settings.data_dir / 'final_contacts.xlsx'}")

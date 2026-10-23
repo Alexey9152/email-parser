@@ -81,28 +81,44 @@ class PlaywrightMapsProvider(MapsProviderBase):
             try:
                 place_urls: list[str] = []
                 query_by_url: dict[str, str] = {}
+                query_errors: list[Exception] = []
                 for index, query in enumerate(queries, start=1):
                     if len(place_urls) >= limit:
                         break
                     log.info(
                         "Maps query %d/%d: %s", index, len(queries), query
                     )
-                    found = self._collect_place_urls(
-                        page, query, per_query, area
-                    )
+                    try:
+                        found = self._collect_place_urls(
+                            page, query, per_query, area
+                        )
+                    except Exception as exc:  # noqa: BLE001 - keep other categories alive
+                        query_errors.append(exc)
+                        log.warning("Maps query failed (%s): %s", query, exc)
+                        continue
                     log.info("  %d place link(s)", len(found))
                     for url in found:
                         query_by_url.setdefault(url, query)
                     place_urls = unique(place_urls + found)
+
+                if not place_urls and query_errors:
+                    raise MapsProviderError(
+                        "Google Maps returned no places for any category. "
+                        f"Last error: {query_errors[-1]}"
+                    )
 
                 place_urls = place_urls[:limit]
                 log.info("Google Maps: %d unique places to open", len(place_urls))
                 restaurants: list[Restaurant] = []
                 detail = context.new_page()
                 for index, url in enumerate(place_urls, start=1):
-                    item = self._read_place(
-                        detail, url, query_by_url.get(url, queries[0])
-                    )
+                    try:
+                        item = self._read_place(
+                            detail, url, query_by_url.get(url, queries[0])
+                        )
+                    except Exception as exc:  # noqa: BLE001 - one place must not abort the run
+                        log.warning("Could not read place %s: %s", url, exc)
+                        continue
                     if item and item.title:
                         if area is not None and item.latitude is not None and item.longitude is not None:
                             if not area.contains(item.latitude, item.longitude):

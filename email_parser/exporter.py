@@ -14,6 +14,7 @@ from .models import (
     SOURCE_FB_SNIPPET,
     SOURCE_GUESS,
     SOURCE_LABELS,
+    SOURCE_OSM,
     SOURCE_SEARCH,
     SOURCE_SITE,
     SOURCE_SITE_JS,
@@ -53,6 +54,7 @@ SOURCE_CSV_LABELS = {
     SOURCE_FB_PAGE: "facebook (page)",
     SOURCE_FB_SNIPPET: "facebook (search snippet)",
     SOURCE_SEARCH: "web search",
+    SOURCE_OSM: "OpenStreetMap",
     SOURCE_GUESS: "guessed MX",
 }
 
@@ -61,6 +63,7 @@ STATUS_LABELS = {
     "Found on FB": "Найден на Facebook",
     "Found via web search": "Найден в поиске",
     "Found via JS render": "Найден после рендера",
+    "Found on OpenStreetMap": "Найден в OpenStreetMap",
     "Guessed (unverified)": "Предположение (не проверено)",
     "Not found": "Не найден",
 }
@@ -70,6 +73,7 @@ STATUS_FILLS = {
     "Found on FB": "BDD7EE",
     "Found via web search": "DDEBF7",
     "Found via JS render": "E2EFDA",
+    "Found on OpenStreetMap": "D9E1F2",
     "Guessed (unverified)": "FFEB9C",
     "Not found": "FFC7CE",
 }
@@ -339,6 +343,8 @@ SOURCE_EN_VALUES = {label: value for value, label in SOURCE_CSV_LABELS.items()}
 
 def _source_from_status(status: str) -> str:
     lowered = (status or "").lower()
+    if "openstreetmap" in lowered or "open street map" in lowered or "osm" in lowered:
+        return SOURCE_OSM
     if "facebook" in lowered or "fb" in lowered:
         return SOURCE_FB_PAGE
     if "рендер" in lowered or "render" in lowered:

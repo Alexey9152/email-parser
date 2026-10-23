@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
-from .extractors import emails_from_page
+from .extractors import emails_from_page, facebook_from_html
 from .utils import normalize_url, unique
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ class RenderResult:
     pages: list[str] = field(default_factory=list)
     blocked: bool = False
     error: str = ""
+    # A Facebook page to open in the browser afterwards.  Populated from the
+    # rendered DOM for ordinary sites and from the input URL for Facebook pages.
+    facebook_url: str = ""
 
 
 class PlaywrightSiteRenderer:
@@ -87,17 +90,24 @@ class PlaywrightSiteRenderer:
             result.emails = self._visit(page, start, result.pages)
             if is_facebook:
                 # The address is usually in "Intro / About" behind "See more".
+                result.facebook_url = start
                 result.emails = unique(
                     result.emails + self._facebook_expand(page)
                 )
-            elif not result.emails and follow_contact:
-                for link in self._contact_hrefs(page, limit=2):
-                    if len(result.pages) >= 3:
-                        break
-                    emails = self._visit(page, link, result.pages)
-                    if emails:
-                        result.emails = unique(result.emails + emails)
-                        break
+            else:
+                # Many small venues only expose their Facebook link in the DOM
+                # or inside a JSON-LD block; remember it for the Facebook stage.
+                result.facebook_url = self._facebook_from_page(page)
+                if not result.emails and follow_contact:
+                    for link in self._contact_hrefs(page, limit=2):
+                        if len(result.pages) >= 3:
+                            break
+                        emails = self._visit(page, link, result.pages)
+                        if not result.facebook_url:
+                            result.facebook_url = self._facebook_from_page(page)
+                        if emails:
+                            result.emails = unique(result.emails + emails)
+                            break
             result.blocked = self._is_blocked(page)
         except Exception as exc:  # noqa: BLE001 - browser errors are expected
             result.error = str(exc)[:200]
@@ -132,6 +142,22 @@ class PlaywrightSiteRenderer:
         if not emails:
             emails.extend(self._click_reveal_buttons(page))
         return unique(emails)
+
+    def _facebook_from_page(self, page) -> str:
+        """Return the best Facebook profile link found in the rendered page."""
+        title = ""
+        try:
+            title = page.title()
+        except Exception:
+            pass
+        for frame in page.frames:
+            try:
+                found = facebook_from_html(frame.content(), title)
+            except Exception:
+                continue
+            if found:
+                return found
+        return ""
 
     def _contact_hrefs(self, page, limit: int = 2) -> list[str]:
         hrefs: list[str] = []

@@ -5,6 +5,7 @@ from __future__ import annotations
 from email_parser.facebook import SocialEmailFinder
 from email_parser.serp import (
     BackendBlocked,
+    DDGSBackend,
     DuckDuckGoBackend,
     SearchHit,
     WebSearch,
@@ -53,6 +54,21 @@ def test_unwrap_plain_and_redirect_links():
     )
 
 
+def test_ddgs_rows_are_converted_without_network():
+    rows = [
+        {
+            "title": "OC Uptown Eats | Ocean City MD - Facebook",
+            "href": "https://www.facebook.com/ocuptowneats/",
+            "body": "Write to alluse@aol.com or call us.",
+        },
+        {"title": "", "href": "", "body": ""},
+    ]
+    hits = DDGSBackend._to_hits(rows, num=10)
+    assert len(hits) == 1
+    assert hits[0].link == "https://www.facebook.com/ocuptowneats/"
+    assert "alluse@aol.com" in hits[0].snippet
+
+
 def test_email_filtering_drops_directories():
     hits = [
         SearchHit(title="Joe's Diner", snippet="joes@gmail.com"),
@@ -68,9 +84,9 @@ def test_relevance_requires_title_words():
     assert not SocialEmailFinder._relevant(other, "Joe's Diner")
 
 
-def test_chain_skips_dead_backend():
-    class Dead:
-        name = "dead"
+def test_chain_falls_through_empty_backend():
+    class Empty:
+        name = "empty"
         calls = 0
 
         def search(self, query, num=20):
@@ -83,13 +99,17 @@ def test_chain_skips_dead_backend():
         def search(self, query, num=20):
             return [SearchHit(title="x")]
 
-    dead, good = Dead(), Good()
-    chain = WebSearch([dead, good], delay=0, cooldown=60)
+    empty, good = Empty(), Good()
+    chain = WebSearch([empty, good], delay=0, cooldown=60)
     assert chain.search("q")[1] == "good"
     chain.search("q")
-    assert dead.calls == 2  # cooled down after two empty answers
+    assert empty.calls == 2
+    # Empty results are normal for exact venue queries and must not disable a
+    # backend; only an explicit block/rate-limit does that.
+    chain.search("q")
+    assert empty.calls == 3
     assert chain.search("q")[1] == "good"
-    assert dead.calls == 2
+    assert empty.calls == 4
 
 
 def test_chain_marks_blocked_backend():

@@ -155,15 +155,19 @@ class SocialEmailFinder:
         location = f' "{clean_whitespace(city)}"' if city else ""
         options: list[tuple[str, str]] = []
         if facebook_url:
-            # The page is already known: ask Google to show its contact block.
+            # The page is already known: ask the engine to show its contact block.
             options.append(
                 ("facebook", f'"{canonical}" email')
             )
         options.extend(
             [
-                ("facebook", f'site:facebook.com "{title}"{location}'),
-                ("facebook", f'site:facebook.com "{title}"{location} email'),
+                # Free engines (DDGS) often ignore the ``site:`` operator, but a
+                # normal phrase query still surfaces the Facebook page and its
+                # contact snippet.  Keep the more precise site: query as a later
+                # option for paid Google backends.
+                ("facebook", f'"{title}"{location} facebook email'),
                 ("web", f'"{title}"{location} email'),
+                ("facebook", f'site:facebook.com "{title}"{location} email'),
                 ("web", f'"{title}"{location} contact'),
             ]
         )
